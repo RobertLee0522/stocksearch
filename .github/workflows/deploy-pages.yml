@@ -29,6 +29,17 @@ jobs:
         run: npm ci
       - name: Build static site
         run: npm run build
+      - name: Match asset paths to the /stocksearch/ site root
+        # vinext emits assets into the assetPrefix directory (dist/client/stocksearch/_next),
+        # but the artifact is already served from /stocksearch/, so the URLs in index.html
+        # (/stocksearch/_next/...) resolve to the artifact root. Move the assets up one level.
+        run: |
+          if [ -d dist/client/stocksearch/_next ]; then
+            mv dist/client/stocksearch/_next dist/client/_next
+            rmdir dist/client/stocksearch
+          fi
+          test -f dist/client/index.html
+          test -d dist/client/_next
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload site artifact

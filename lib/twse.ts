@@ -74,3 +74,51 @@ export async function fetchOfficialStock(code: string, today = new Date()): Prom
     candles,
   };
 }
+
+export type DailyQuote = {
+  code: string;
+  name: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  change: number;
+  shares: number;
+};
+
+const MI_INDEX = 'https://www.twse.com.tw/exchangeReport/MI_INDEX';
+
+const toYmd = (date: Date) =>
+  `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+
+/** 每日收盤行情的漲跌欄位帶有 HTML，例如 <p style= color:red>+</p>。 */
+export function parseQuoteRow(row: string[]): DailyQuote | null {
+  const close = toNumber(row[8]);
+  if (!Number.isFinite(close)) return null;
+  const diff = toNumber(row[10]);
+  const falling = row[9].replace(/<[^>]*>/g, '').includes('-');
+  return {
+    code: row[0], name: row[1], open: toNumber(row[5]), high: toNumber(row[6]), low: toNumber(row[7]), close,
+    change: Number.isFinite(diff) ? (falling ? -diff : diff) : 0,
+    shares: toNumber(row[2]),
+  };
+}
+
+/** 一次取得全部上市個股的當日收盤行情；當天非交易日時往前尋找最近的交易日。 */
+export async function fetchDailyQuotes(today = new Date(), lookbackDays = 10) {
+  for (let offset = 0; offset <= lookbackDays; offset += 1) {
+    const day = new Date(today.getFullYear(), today.getMonth(), today.getDate() - offset);
+    const response = await fetch(`${MI_INDEX}?response=json&date=${toYmd(day)}&type=ALLBUT0999`);
+    if (!response.ok) continue;
+    const payload = await response.json() as { stat?: string; tables?: { fields?: string[]; data?: string[][] }[] };
+    if (payload.stat !== 'OK') continue;
+    const table = payload.tables?.find((item) => item.fields?.[0] === '證券代號');
+    const quotes: Record<string, DailyQuote> = {};
+    for (const row of table?.data ?? []) {
+      const quote = parseQuoteRow(row);
+      if (quote) quotes[quote.code] = quote;
+    }
+    if (Object.keys(quotes).length) return { date: toYmd(day), quotes };
+  }
+  throw new Error('無法取得當日收盤行情');
+}
