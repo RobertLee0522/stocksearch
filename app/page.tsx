@@ -1,43 +1,154 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Activity, Bell, Building2, ChevronDown, CircleDollarSign, ExternalLink, Landmark, LineChart as LineChartIcon, Menu, Search, ShieldAlert, Star, TrendingDown, TrendingUp, Users, WalletCards } from 'lucide-react';
-import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import {
+  Activity, Bell, Building2, ChevronDown, ExternalLink, Landmark,
+  Menu, Search, ShieldAlert, Star, TrendingDown, TrendingUp, Users,
+  WalletCards,
+} from 'lucide-react';
+
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-type Stock = { code: string; name: string; price: string; change: string; percent: string; high: string; low: string; open: string; volume: string; date: string };
-const stocks: Record<string, Stock> = {
-  '2330': { code: '2330', name: '台積電', price: '1,175.00', change: '+15.00', percent: '+1.29%', high: '1,180.00', low: '1,158.00', open: '1,160.00', volume: '28,632 張', date: '示範盤中資料 · 13:28' },
-  '2454': { code: '2454', name: '聯發科', price: '1,385.00', change: '+28.00', percent: '+2.06%', high: '1,395.00', low: '1,350.00', open: '1,355.00', volume: '4,896 張', date: '示範盤中資料 · 13:28' },
-  '2317': { code: '2317', name: '鴻海', price: '198.50', change: '-1.50', percent: '-0.75%', high: '202.00', low: '197.50', open: '201.50', volume: '35,118 張', date: '示範盤中資料 · 13:28' },
+type Stock = {
+  code: string;
+  name: string;
+  price: number;
+  change: number;
+  volume: string;
+  industry: string;
+  chips: { foreign: string; trust: string; dealer: string };
 };
-const pricePoints = [['09:00', 1160], ['09:15', 1164], ['09:30', 1161], ['10:00', 1167], ['10:30', 1172], ['11:00', 1169], ['11:30', 1176], ['12:00', 1171], ['12:30', 1178], ['13:00', 1175], ['13:25', 1175]].map(([time, price]) => ({ time, price }));
-const chips = [{ title: '外資', value: '+4,821', icon: Building2, tone: 'up', note: '連 3 買' }, { title: '投信', value: '+1,206', icon: Landmark, tone: 'up', note: '連 5 買' }, { title: '自營商', value: '-382', icon: WalletCards, tone: 'down', note: '避險賣超' }];
-const orders = [['大戶 (≥400張)', '7,482', '+1,926', '69%', 'up'], ['中實戶 (100–399張)', '12,460', '+642', '56%', 'up'], ['散戶 (<100張)', '38,915', '-2,568', '44%', 'down']];
-const watchList = [['2330', '台積電', '1,175.00', '+1.29%', true], ['2454', '聯發科', '1,385.00', '+2.06%', true], ['2317', '鴻海', '198.50', '-0.75%', false], ['2382', '廣達', '312.00', '+0.97%', true]];
+
+const stockList: Stock[] = [
+  { code: '2330', name: '台積電', price: 1175, change: 15, volume: '28,632 張', industry: '半導體業', chips: { foreign: '+4,821', trust: '+1,206', dealer: '-382' } },
+  { code: '2454', name: '聯發科', price: 1385, change: 28, volume: '4,896 張', industry: '半導體業', chips: { foreign: '+821', trust: '+342', dealer: '+58' } },
+  { code: '2317', name: '鴻海', price: 198.5, change: -1.5, volume: '35,118 張', industry: '其他電子業', chips: { foreign: '-1,683', trust: '+204', dealer: '-96' } },
+  { code: '2382', name: '廣達', price: 312, change: 3, volume: '12,408 張', industry: '電腦及週邊設備業', chips: { foreign: '+1,120', trust: '+287', dealer: '+40' } },
+  { code: '2303', name: '聯電', price: 48.3, change: 0.7, volume: '47,682 張', industry: '半導體業', chips: { foreign: '+2,304', trust: '-175', dealer: '+122' } },
+  { code: '0050', name: '元大台灣50', price: 206.1, change: 1.4, volume: '18,740 張', industry: 'ETF', chips: { foreign: '+3,415', trust: '—', dealer: '+84' } },
+];
+
+const baseKline = [
+  ['08/14', 1143, 1151, 1138, 1148], ['08/15', 1147, 1158, 1143, 1155],
+  ['08/18', 1154, 1158, 1146, 1149], ['08/19', 1151, 1166, 1147, 1164],
+  ['08/20', 1165, 1169, 1157, 1161], ['08/21', 1160, 1174, 1158, 1171],
+  ['08/22', 1173, 1178, 1164, 1167], ['08/25', 1166, 1172, 1157, 1160],
+  ['08/26', 1162, 1175, 1159, 1172], ['08/27', 1170, 1180, 1168, 1177],
+  ['08/28', 1178, 1181, 1169, 1171], ['08/29', 1172, 1179, 1166, 1175],
+].map(([date, open, high, low, close]) => ({ date: String(date), open: Number(open), high: Number(high), low: Number(low), close: Number(close) }));
+
+function klineFor(stock: Stock) {
+  const factor = stock.price / 1175;
+  return baseKline.map((candle) => ({
+    ...candle,
+    open: Number((candle.open * factor).toFixed(1)), high: Number((candle.high * factor).toFixed(1)),
+    low: Number((candle.low * factor).toFixed(1)), close: Number((candle.close * factor).toFixed(1)),
+  }));
+}
 
 export default function Home() {
-  const [query, setQuery] = useState('2330'); const [activeCode, setActiveCode] = useState('2330'); const [notice, setNotice] = useState('目前顯示範例資料；連接報價服務後會自動切換為即時資料。');
-  const stock = stocks[activeCode] ?? stocks['2330']; const isUp = stock.change.startsWith('+');
-  const chartPoints = useMemo(() => pricePoints.map((p) => ({ ...p, price: activeCode === '2317' ? 198 + ((p.price as number) - 1160) / 3 : activeCode === '2454' ? 1370 + ((p.price as number) - 1160) * 1.15 : p.price })), [activeCode]);
-  const baseline = chartPoints[0].price as number;
-  function findStock(event?: React.FormEvent) { event?.preventDefault(); const normalized = query.trim().replace(/台積電/g, '2330').replace(/聯發科/g, '2454').replace(/鴻海/g, '2317'); if (stocks[normalized]) { setActiveCode(normalized); setNotice(`已載入 ${stocks[normalized].code} ${stocks[normalized].name} 的範例資訊。`); } else setNotice('找不到這檔股票。試試 2330、2454 或 2317。'); }
-  return <main className="min-h-screen bg-[#07131f] text-[#e9f1f6] selection:bg-[#24d6a5]/30">
-    <header className="sticky top-0 z-30 border-b border-white/8 bg-[#07131f]/95 backdrop-blur"><div className="mx-auto flex h-16 max-w-[1600px] items-center gap-4 px-4 lg:px-7">
-      <button className="flex items-center gap-2.5 text-left" onClick={() => setNotice('籌碼雷達 · 台股籌碼與價格工作台')}><span className="grid size-9 place-items-center rounded-xl bg-[#24d6a5] text-[#06201c] shadow-[0_0_30px_rgba(36,214,165,.28)]"><Activity className="size-5" /></span><span><strong className="block text-sm tracking-wide">籌碼雷達</strong><small className="block text-[10px] tracking-[.16em] text-[#8ca0ae]">TAIWAN STOCK DESK</small></span></button>
-      <nav className="hidden items-center gap-1 lg:flex">{['市場總覽', '個股研究', '籌碼排行', '自選清單'].map((item, index) => <button key={item} className={`rounded-lg px-3 py-2 text-sm ${index === 1 ? 'bg-white/8 text-white' : 'text-[#91a4b1] hover:text-white'}`} onClick={() => setNotice(`${item}功能已就緒，可接上資料服務後擴充。`)}>{item}</button>)}</nav>
-      <form onSubmit={findStock} className="ml-auto flex w-full max-w-md items-center gap-2"><label className="relative block min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[#76909f]" /><Input aria-label="輸入股票代號或名稱" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="輸入代號或名稱，例如 2330" className="h-10 border-white/10 bg-white/6 pl-9 text-sm text-white placeholder:text-[#78909e]" /></label><Button type="submit" className="h-10 bg-[#24d6a5] px-4 text-[#06201c] hover:bg-[#5ce6bf]">查詢</Button></form>
-      <Button variant="ghost" size="icon" className="hidden text-[#a6b8c4] md:inline-flex" aria-label="通知"><Bell /></Button><Button variant="ghost" size="icon" className="text-[#a6b8c4] lg:hidden" aria-label="開啟選單"><Menu /></Button>
-    </div></header>
-    <div className="mx-auto max-w-[1600px] px-4 py-5 lg:px-7"><div role="status" className="mb-5 flex items-center gap-2 rounded-lg border border-[#d7a738]/20 bg-[#d7a738]/8 px-3 py-2 text-xs text-[#dcc979]"><ShieldAlert className="size-3.5" />{notice}</div>
-      <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]"><div className="space-y-5">
-        <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label="加入自選" onClick={() => setNotice(`${stock.name} 已加入本機自選清單。`)} className="mt-1 rounded-lg p-1.5 text-[#d7a738] hover:bg-[#d7a738]/10"><Star className="size-5 fill-current" /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">上市</span></div><p className="mt-2 text-xs text-[#8298a7]">{stock.date} <span className="ml-2 text-[#d6c779]">行情來源待串接</span></p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${isUp ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${isUp ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{isUp ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{stock.change} <span>{stock.percent}</span></div></div><div className="grid grid-cols-3 gap-x-5 text-right text-xs"><Quote label="今開" value={stock.open} /><Quote label="最高" value={stock.high} /><Quote label="最低" value={stock.low} /><Quote label="總量" value={stock.volume} /></div></section>
-        <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.55fr)_minmax(370px,1fr)]"><div className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">盤中走勢</h2><p className="mt-1 text-xs text-[#8197a5]">分時價格與成交量 · 近 1 日</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['分時', '日K', '週K', '月K'].map((item, index) => <button key={item} onClick={() => setNotice(`${item}視圖將依選取週期重繪。`)} className={`rounded-md px-2.5 py-1.5 ${index === 0 ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><div className="h-[300px] w-full"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartPoints} margin={{ top: 8, right: 10, left: -18, bottom: 0 }}><defs><linearGradient id="price-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#24d6a5" stopOpacity={0.36} /><stop offset="100%" stopColor="#24d6a5" stopOpacity={0} /></linearGradient></defs><CartesianGrid vertical={false} stroke="#ffffff10" /><XAxis dataKey="time" tickLine={false} axisLine={false} minTickGap={28} tick={{ fill: '#718897', fontSize: 11 }} /><YAxis domain={['dataMin - 5', 'dataMax + 5']} tickLine={false} axisLine={false} tick={{ fill: '#718897', fontSize: 11 }} /><Tooltip contentStyle={{ background: '#102638', border: '1px solid #ffffff16', borderRadius: 10 }} labelStyle={{ color: '#9bb0bc' }} itemStyle={{ color: '#67e8c2' }} formatter={(value: number) => [value.toFixed(2), '成交價']} /><ReferenceLine y={baseline} stroke="#d7a738" strokeDasharray="3 3" strokeOpacity={0.65} /><Area type="monotone" dataKey="price" stroke="#31ddb0" strokeWidth={2.2} fill="url(#price-fill)" /></AreaChart></ResponsiveContainer></div><div className="mt-2 flex items-center gap-4 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-[#31ddb0]" />成交價</span><span className="flex items-center gap-1.5"><i className="h-px w-3 bg-[#d7a738]" />昨收基準</span><span className="ml-auto">資料更新需依供應商頻率而定</span></div></div>
-        <div className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center justify-between"><div><h2 className="font-semibold">法人買賣超</h2><p className="mt-1 text-xs text-[#8197a5]">單位：張</p></div><button className="text-xs text-[#64dfbb] hover:underline" onClick={() => setNotice('完整法人明細可串接公開資訊觀測站或商業資料服務。')}>查看明細</button></div><div className="mt-5 space-y-4">{chips.map(({ title, value, icon: Icon, tone, note }) => <div key={title} className="flex items-center gap-3"><span className={`grid size-9 place-items-center rounded-lg ${tone === 'up' ? 'bg-[#24d6a5]/10 text-[#55e6bc]' : 'bg-[#ff6d72]/10 text-[#ff8588]'}`}><Icon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex justify-between text-sm"><span>{title}</span><strong className={`font-mono ${tone === 'up' ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{value}<small className="ml-1 font-normal text-[#8197a5]">張</small></strong></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/7"><div className={`h-full rounded-full ${tone === 'up' ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} style={{ width: title === '外資' ? '72%' : title === '投信' ? '47%' : '26%' }} /></div></div><span className="text-[10px] text-[#8197a5]">{note}</span></div>)}</div><div className="mt-6 rounded-xl border border-[#24d6a5]/14 bg-[#24d6a5]/5 p-3"><p className="flex items-center gap-2 text-xs font-medium text-[#75e8c7]"><CircleDollarSign className="size-4" />三大法人合計 <strong className="ml-auto font-mono text-sm">+5,645 張</strong></p><p className="mt-1.5 text-[11px] text-[#8ca1ad]">僅作為觀察指標，非買賣建議。</p></div></div></section>
-        <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><Users className="size-4 text-[#d7a738]" /><h2 className="font-semibold">大戶 / 散戶籌碼</h2></div><p className="mt-1 text-xs text-[#8197a5]">依持股級距觀察集保戶數與持股集中度</p></div><span className="rounded-full border border-[#d7a738]/20 bg-[#d7a738]/10 px-2.5 py-1 text-[10px] text-[#e7d17f]">需授權籌碼資料來源</span></div><div className="mt-5 overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead className="border-b border-white/8 text-[11px] tracking-wide text-[#728998]"><tr><th className="pb-3 font-medium">投資人級距</th><th className="pb-3 text-right font-medium">持股人數</th><th className="pb-3 text-right font-medium">本週增減</th><th className="pb-3 text-right font-medium">持股集中度</th><th className="pb-3 pl-6 font-medium">籌碼傾向</th></tr></thead><tbody>{orders.map(([label, people, change, concentration, tone]) => <tr key={label} className="border-b border-white/5 last:border-0"><td className="py-4 font-medium">{label}</td><td className="py-4 text-right font-mono text-[#afc0c9]">{people}</td><td className={`py-4 text-right font-mono ${tone === 'up' ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{change}</td><td className="py-4 text-right"><span className="font-mono">{concentration}</span><span className="ml-2 inline-block h-1.5 w-16 overflow-hidden rounded-full bg-white/7 align-middle"><i className={`block h-full rounded-full ${tone === 'up' ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} style={{ width: concentration }} /></span></td><td className="py-4 pl-6"><span className={`rounded-md px-2 py-1 text-xs ${tone === 'up' ? 'bg-[#24d6a5]/10 text-[#5ce6bf]' : 'bg-[#ff6d72]/10 text-[#ff989a]'}`}>{tone === 'up' ? '偏多累積' : '偏空調節'}</span></td></tr>)}</tbody></table></div></section>
-      </div><aside className="space-y-5"><section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center justify-between"><div><h2 className="font-semibold">自選清單</h2><p className="mt-1 text-xs text-[#8197a5]">4 檔 · 延遲示範</p></div><button onClick={() => setNotice('自選清單已保存在目前瀏覽器。')} className="rounded-lg bg-white/7 p-2 text-[#afc0ca] hover:bg-white/10"><ChevronDown className="size-4" /></button></div><div className="mt-4 divide-y divide-white/6">{watchList.map(([code, name, price, percent, up]) => <button key={code} onClick={() => { setQuery(code as string); setActiveCode(code as string); setNotice(`已切換至 ${name}。`); }} className={`flex w-full items-center gap-2 py-3 text-left hover:bg-white/[.025] ${code === activeCode ? 'rounded-lg bg-white/[.035] px-2 -mx-2' : ''}`}><span className={`size-1.5 rounded-full ${up ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} /><span className="min-w-0 flex-1"><strong className="block text-sm font-medium">{name}</strong><small className="font-mono text-[10px] text-[#718795]">{code}</small></span><span className="text-right"><strong className="block font-mono text-sm">{price}</strong><small className={`font-mono text-[11px] ${up ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{percent}</small></span></button>)}</div><button onClick={() => setNotice('可在下一版加入登入後的跨裝置同步自選股。')} className="mt-4 flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-white/15 py-2 text-xs text-[#9fb0bb] hover:border-[#24d6a5]/50 hover:text-[#5ce6bf]">+ 新增自選股</button></section><section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center gap-2"><LineChartIcon className="size-4 text-[#7bc0ff]" /><h2 className="font-semibold">籌碼訊號</h2></div><div className="mt-4 space-y-3"><Signal label="法人動能" value="偏多" progress="76%" color="bg-[#24d6a5]" /><Signal label="大戶集中" value="升溫" progress="69%" color="bg-[#d7a738]" /><Signal label="短線乖離" value="中性" progress="48%" color="bg-[#6ea8ff]" /></div><button onClick={() => setNotice('警示功能可在串接即時資料後，依價格、成交量及籌碼條件觸發。')} className="mt-5 flex w-full items-center justify-center gap-1 text-xs text-[#67dfbc] hover:underline">設定訊號警示 <ExternalLink className="size-3" /></button></section><section className="rounded-2xl border border-[#d7a738]/20 bg-gradient-to-br from-[#1e2a2b] to-[#0b1d2c] p-5"><p className="text-[10px] font-semibold tracking-[.14em] text-[#d7c479]">資料服務接入</p><h2 className="mt-2 text-base font-semibold">把展示版變成即時盤中站</h2><p className="mt-2 text-xs leading-5 text-[#9cafb9]">串接合法行情、籌碼與法人資料 API 後，可顯示更新時間、延遲狀態與來源。</p><button onClick={() => setNotice('下一步：設定授權資料服務的 API 金鑰與更新頻率。')} className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-[#6ee5c1] hover:underline">查看串接需求 <ChevronDown className="size-3 -rotate-90" /></button></section></aside></section>
-    </div></main>;
+  const [activeCode, setActiveCode] = useState('2330');
+  const [query, setQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [notice, setNotice] = useState('目前為公開資料版介面；盤中即時行情與即時籌碼需串接合法資料服務。');
+  const stock = stockList.find((item) => item.code === activeCode) ?? stockList[0];
+  const isUp = stock.change >= 0;
+  const matches = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    return term ? stockList.filter((item) => item.code.includes(term) || item.name.toLowerCase().includes(term)) : stockList;
+  }, [query]);
+
+  function selectStock(next: Stock) {
+    setActiveCode(next.code);
+    setQuery('');
+    setSearchOpen(false);
+    setNotice(`已載入 ${next.code} ${next.name}。K 線與籌碼資料目前為介面示範。`);
+  }
+
+  function submitSearch(event: React.FormEvent) {
+    event.preventDefault();
+    if (matches[0]) selectStock(matches[0]);
+    else setNotice('找不到符合的股票，請輸入代號或名稱，例如 2330、台積電、0050。');
+  }
+
+  return (
+    <main className="min-h-screen bg-[#07131f] text-[#e9f1f6] selection:bg-[#24d6a5]/30">
+      <header className="sticky top-0 z-30 border-b border-white/8 bg-[#07131f]/95 backdrop-blur">
+        <div className="mx-auto flex h-16 max-w-[1600px] items-center gap-4 px-4 lg:px-7">
+          <button className="flex items-center gap-2.5 text-left" onClick={() => setNotice('籌碼雷達 · 台股價格與籌碼工作台')}>
+            <span className="grid size-9 place-items-center rounded-xl bg-[#24d6a5] text-[#06201c] shadow-[0_0_30px_rgba(36,214,165,.28)]"><Activity className="size-5" /></span>
+            <span><strong className="block text-sm tracking-wide">籌碼雷達</strong><small className="block text-[10px] tracking-[.16em] text-[#8ca0ae]">TAIWAN STOCK DESK</small></span>
+          </button>
+          <nav className="hidden items-center gap-1 lg:flex">
+            {['市場總覽', '個股研究', '籌碼排行', '自選清單'].map((item, index) => <button key={item} className={`rounded-lg px-3 py-2 text-sm ${index === 1 ? 'bg-white/8 text-white' : 'text-[#91a4b1] hover:text-white'}`} onClick={() => setNotice(`${item}功能會隨資料服務接入持續擴充。`)}>{item}</button>)}
+          </nav>
+          <form onSubmit={submitSearch} className="relative ml-auto flex w-full max-w-md items-center gap-2">
+            <label className="relative block min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[#76909f]" /><Input aria-label="查詢股票代號或名稱" value={query} onFocus={() => setSearchOpen(true)} onChange={(event) => { setQuery(event.target.value); setSearchOpen(true); }} placeholder="查詢代號或名稱，例如 2330" className="h-10 border-white/10 bg-white/6 pl-9 text-sm text-white placeholder:text-[#78909e]" /></label>
+            <Button type="submit" className="h-10 bg-[#24d6a5] px-4 text-[#06201c] hover:bg-[#5ce6bf]">查詢</Button>
+            {searchOpen && <div className="absolute left-0 top-11 z-50 w-[calc(100%-74px)] overflow-hidden rounded-xl border border-white/10 bg-[#102638] shadow-2xl">{matches.length ? matches.slice(0, 6).map((item) => <button type="button" key={item.code} onMouseDown={(event) => event.preventDefault()} onClick={() => selectStock(item)} className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-white/7"><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#a9bbc5]">{item.code}</span><span className="flex-1 text-sm">{item.name}</span><span className="font-mono text-xs text-[#8fa5b2]">{item.price.toLocaleString('zh-TW')}</span></button>) : <p className="px-3 py-3 text-sm text-[#93a7b3]">沒有符合的股票</p>}</div>}
+          </form>
+          <Button variant="ghost" size="icon" className="hidden text-[#a6b8c4] md:inline-flex" aria-label="通知"><Bell /></Button><Button variant="ghost" size="icon" className="text-[#a6b8c4] lg:hidden" aria-label="選單"><Menu /></Button>
+        </div>
+      </header>
+
+      <div className="mx-auto max-w-[1600px] px-4 py-5 lg:px-7">
+        <div role="status" className="mb-5 flex items-center gap-2 rounded-lg border border-[#d7a738]/20 bg-[#d7a738]/8 px-3 py-2 text-xs text-[#dcc979]"><ShieldAlert className="size-3.5" />{notice}</div>
+        <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
+          <div className="space-y-5">
+            <StockSummary stock={stock} up={isUp} onWatch={() => setNotice(`${stock.name} 已加入本機自選清單。`)} />
+            <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.55fr)_minmax(370px,1fr)]">
+              <KlinePanel stock={stock} />
+              <InstitutionPanel stock={stock} />
+            </section>
+            <OwnershipPanel />
+          </div>
+          <aside className="space-y-5">
+            <Watchlist activeCode={activeCode} onSelect={selectStock} />
+            <SignalPanel />
+            <section className="rounded-2xl border border-[#d7a738]/20 bg-gradient-to-br from-[#1e2a2b] to-[#0b1d2c] p-5"><p className="text-[10px] font-semibold tracking-[.14em] text-[#d7c479]">資料服務接入</p><h2 className="mt-2 text-base font-semibold">下一步：公開資料查詢</h2><p className="mt-2 text-xs leading-5 text-[#9cafb9]">可先接日收盤、法人買賣超與集保週資料；授權 API 則可再擴充盤中報價。</p><button className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-[#6ee5c1] hover:underline" onClick={() => setNotice('免費公開資料版可提供日資料與週籌碼；盤中逐筆行情需另行授權。')}>查看資料層級 <ChevronDown className="size-3 -rotate-90" /></button></section>
+          </aside>
+        </section>
+      </div>
+    </main>
+  );
 }
+
+function StockSummary({ stock, up, onWatch }: { stock: Stock; up: boolean; onWatch: () => void }) {
+  const open = stock.price - stock.change * 0.72;
+  const high = stock.price + Math.abs(stock.change) * 0.56 + stock.price * 0.003;
+  const low = stock.price - Math.abs(stock.change) * 0.62 - stock.price * 0.002;
+  const percent = stock.change / (stock.price - stock.change) * 100;
+  return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label="加入自選" onClick={onWatch} className="mt-1 rounded-lg p-1.5 text-[#d7a738] hover:bg-[#d7a738]/10"><Star className="size-5 fill-current" /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">示範資料 · 收盤後資料接入後將顯示實際更新時間</p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={open.toFixed(1)} /><Quote label="最高" value={high.toFixed(1)} /><Quote label="最低" value={low.toFixed(1)} /><Quote label="總量" value={stock.volume} /></div></section>;
+}
+
+function KlinePanel({ stock }: { stock: Stock }) {
+  const [range, setRange] = useState('20日');
+  const fullData = useMemo(() => klineFor(stock), [stock]);
+  const data = range === '5日' ? fullData.slice(-5) : fullData;
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name}</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">目前顯示示範 OHLC 資料</span></div></section>;
+}
+
+function CandlestickChart({ data }: { data: ReturnType<typeof klineFor> }) {
+  const [hovered, setHovered] = useState(data.length - 1);
+  const width = 760; const height = 310; const pad = { left: 48, right: 12, top: 16, bottom: 38 };
+  const max = Math.max(...data.map((item) => item.high)); const min = Math.min(...data.map((item) => item.low)); const buffer = (max - min) * 0.14 || 1;
+  const ceiling = max + buffer; const floor = min - buffer; const plotHeight = height - pad.top - pad.bottom; const plotWidth = width - pad.left - pad.right;
+  const y = (value: number) => pad.top + (ceiling - value) / (ceiling - floor) * plotHeight;
+  const step = plotWidth / data.length; const candleWidth = Math.min(28, Math.max(8, step * 0.58)); const selected = data[hovered] ?? data[data.length - 1];
+  const ticks = [ceiling, (ceiling * 2 + floor) / 3, (ceiling + floor * 2) / 3, floor];
+  return <div className="relative h-[310px] w-full overflow-hidden"><svg role="img" aria-label="日 K 線圖" viewBox={`0 0 ${width} ${height}`} className="h-full w-full"><rect width={width} height={height} fill="transparent" />{ticks.map((tick) => <g key={tick}><line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" /><text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text></g>)}{data.map((item, index) => { const x = pad.left + step * index + step / 2; const rise = item.close >= item.open; const color = rise ? '#ff6d72' : '#24d6a5'; const bodyTop = y(Math.max(item.open, item.close)); const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close))); return <g key={item.date} onMouseEnter={() => setHovered(index)} className="cursor-crosshair"><rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={hovered === index ? '#ffffff08' : 'transparent'} /><line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" /><rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" /><text x={x} y={height - 16} fill="#718897" fontSize="10" textAnchor="middle">{index % Math.ceil(data.length / 6) === 0 || index === data.length - 1 ? item.date : ''}</text></g>; })}</svg><div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg"><span className="mr-3 text-[#879ca9]">{selected.date}</span>開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong></div></div>;
+}
+
+function InstitutionPanel({ stock }: { stock: Stock }) {
+  const rows = [{ title: '外資', value: stock.chips.foreign, icon: Building2 }, { title: '投信', value: stock.chips.trust, icon: Landmark }, { title: '自營商', value: stock.chips.dealer, icon: WalletCards }];
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center justify-between"><div><h2 className="font-semibold">法人買賣超</h2><p className="mt-1 text-xs text-[#8197a5]">單位：張 · 示範資料</p></div><button className="text-xs text-[#64dfbb] hover:underline">查看明細</button></div><div className="mt-5 space-y-4">{rows.map(({ title, value, icon: Icon }) => { const up = !value.startsWith('-'); return <div key={title} className="flex items-center gap-3"><span className={`grid size-9 place-items-center rounded-lg ${up ? 'bg-[#24d6a5]/10 text-[#55e6bc]' : 'bg-[#ff6d72]/10 text-[#ff8588]'}`}><Icon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex justify-between text-sm"><span>{title}</span><strong className={`font-mono ${up ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{value}<small className="ml-1 font-normal text-[#8197a5]">張</small></strong></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/7"><i className={`block h-full rounded-full ${up ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} style={{ width: title === '外資' ? '72%' : title === '投信' ? '48%' : '30%' }} /></div></div></div>; })}</div><div className="mt-6 rounded-xl border border-[#24d6a5]/14 bg-[#24d6a5]/5 p-3"><p className="text-xs font-medium text-[#75e8c7]">三大法人資料可優先串接每日公開資料</p><p className="mt-1.5 text-[11px] text-[#8ca1ad]">僅作為觀察指標，非買賣建議。</p></div></section>;
+}
+
+function OwnershipPanel() { const rows = [['大戶 (≥400張)', '7,482', '+1,926', '69%', '偏多累積', true], ['中實戶 (100–399張)', '12,460', '+642', '56%', '偏多累積', true], ['散戶 (<100張)', '38,915', '-2,568', '44%', '偏空調節', false]]; return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><Users className="size-4 text-[#d7a738]" /><h2 className="font-semibold">大戶 / 散戶籌碼</h2></div><p className="mt-1 text-xs text-[#8197a5]">依持股級距觀察集保戶數與持股集中度</p></div><span className="rounded-full border border-[#d7a738]/20 bg-[#d7a738]/10 px-2.5 py-1 text-[10px] text-[#e7d17f]">公開資料為週資料</span></div><div className="mt-5 overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead className="border-b border-white/8 text-[11px] tracking-wide text-[#728998]"><tr><th className="pb-3 font-medium">投資人級距</th><th className="pb-3 text-right font-medium">持股人數</th><th className="pb-3 text-right font-medium">本週增減</th><th className="pb-3 text-right font-medium">持股集中度</th><th className="pb-3 pl-6 font-medium">籌碼傾向</th></tr></thead><tbody>{rows.map(([label, people, change, concentration, signal, up]) => <tr key={String(label)} className="border-b border-white/5 last:border-0"><td className="py-4 font-medium">{label}</td><td className="py-4 text-right font-mono text-[#afc0c9]">{people}</td><td className={`py-4 text-right font-mono ${up ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{change}</td><td className="py-4 text-right"><span className="font-mono">{concentration}</span><span className="ml-2 inline-block h-1.5 w-16 overflow-hidden rounded-full bg-white/7 align-middle"><i className={`block h-full rounded-full ${up ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} style={{ width: String(concentration) }} /></span></td><td className="py-4 pl-6"><span className={`rounded-md px-2 py-1 text-xs ${up ? 'bg-[#24d6a5]/10 text-[#5ce6bf]' : 'bg-[#ff6d72]/10 text-[#ff989a]'}`}>{signal}</span></td></tr>)}</tbody></table></div></section>; }
+
+function Watchlist({ activeCode, onSelect }: { activeCode: string; onSelect: (stock: Stock) => void }) { return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center justify-between"><div><h2 className="font-semibold">快速查詢</h2><p className="mt-1 text-xs text-[#8197a5]">點選切換個股</p></div><ChevronDown className="size-4 text-[#afc0ca]" /></div><div className="mt-4 divide-y divide-white/6">{stockList.map((stock) => { const up = stock.change >= 0; return <button key={stock.code} onClick={() => onSelect(stock)} className={`flex w-full items-center gap-2 py-3 text-left hover:bg-white/[.025] ${stock.code === activeCode ? 'rounded-lg bg-white/[.035] px-2 -mx-2' : ''}`}><span className={`size-1.5 rounded-full ${up ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} /><span className="min-w-0 flex-1"><strong className="block text-sm font-medium">{stock.name}</strong><small className="font-mono text-[10px] text-[#718795]">{stock.code}</small></span><span className="text-right"><strong className="block font-mono text-sm">{stock.price.toLocaleString('zh-TW')}</strong><small className={`font-mono text-[11px] ${up ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{up ? '+' : ''}{(stock.change / (stock.price - stock.change) * 100).toFixed(2)}%</small></span></button>; })}</div></section>; }
+
+function SignalPanel() { return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center gap-2"><Activity className="size-4 text-[#7bc0ff]" /><h2 className="font-semibold">籌碼訊號</h2></div><div className="mt-4 space-y-3"><Signal label="法人動能" value="偏多" progress="76%" color="bg-[#24d6a5]" /><Signal label="大戶集中" value="升溫" progress="69%" color="bg-[#d7a738]" /><Signal label="短線乖離" value="中性" progress="48%" color="bg-[#6ea8ff]" /></div><button className="mt-5 flex w-full items-center justify-center gap-1 text-xs text-[#67dfbc] hover:underline">設定訊號警示 <ExternalLink className="size-3" /></button></section>; }
 function Quote({ label, value }: { label: string; value: string }) { return <div className="mb-2"><p className="text-[#78909e]">{label}</p><p className="mt-0.5 font-mono font-medium text-[#ccdae1]">{value}</p></div>; }
 function Signal({ label, value, progress, color }: { label: string; value: string; progress: string; color: string }) { return <div><div className="flex justify-between text-xs"><span className="text-[#9db0ba]">{label}</span><strong className="text-[#dce8ed]">{value}</strong></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/7"><i className={`block h-full rounded-full ${color}`} style={{ width: progress }} /></div></div>; }
