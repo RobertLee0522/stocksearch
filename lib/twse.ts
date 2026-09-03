@@ -84,6 +84,19 @@ export type DailyQuote = {
   close: number;
   change: number;
   shares: number;
+  amount: number;
+};
+
+export type MarketIndex = { name: string; close: number; change: number; percent: number };
+
+export type MarketBreadth = { up: number; upLimit: number; down: number; downLimit: number; flat: number };
+
+export type MarketSnapshot = {
+  date: string;
+  quotes: Record<string, DailyQuote>;
+  indices: MarketIndex[];
+  breadth: MarketBreadth | null;
+  turnover: { amount: number; shares: number; trades: number } | null;
 };
 
 const MI_INDEX = 'https://www.twse.com.tw/exchangeReport/MI_INDEX';
@@ -91,34 +104,118 @@ const MI_INDEX = 'https://www.twse.com.tw/exchangeReport/MI_INDEX';
 const toYmd = (date: Date) =>
   `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
 
+const stripTags = (value: string) => value.replace(/<[^>]*>/g, '').trim();
+
 /** 每日收盤行情的漲跌欄位帶有 HTML，例如 <p style= color:red>+</p>。 */
 export function parseQuoteRow(row: string[]): DailyQuote | null {
   const close = toNumber(row[8]);
   if (!Number.isFinite(close)) return null;
   const diff = toNumber(row[10]);
-  const falling = row[9].replace(/<[^>]*>/g, '').includes('-');
+  const falling = stripTags(row[9]).includes('-');
   return {
     code: row[0], name: row[1], open: toNumber(row[5]), high: toNumber(row[6]), low: toNumber(row[7]), close,
     change: Number.isFinite(diff) ? (falling ? -diff : diff) : 0,
-    shares: toNumber(row[2]),
+    shares: toNumber(row[2]), amount: toNumber(row[4]),
   };
 }
 
-/** 一次取得全部上市個股的當日收盤行情；當天非交易日時往前尋找最近的交易日。 */
-export async function fetchDailyQuotes(today = new Date(), lookbackDays = 10) {
+/** 指數表的漲跌點數是絕對值，方向放在另一欄的 HTML 裡。 */
+export function parseIndexRow(row: string[]): MarketIndex | null {
+  const close = toNumber(row[1]);
+  if (!Number.isFinite(close)) return null;
+  const points = toNumber(row[3]);
+  const percent = toNumber(row[4]);
+  const falling = stripTags(row[2]).includes('-');
+  return {
+    name: row[0], close,
+    change: Number.isFinite(points) ? (falling ? -points : points) : 0,
+    percent: Number.isFinite(percent) ? percent : 0,
+  };
+}
+
+/** 漲跌家數欄位形如「209(5)」，括號內是漲停或跌停家數。 */
+function parseBreadthCell(value: string) {
+  const matched = value.match(/([\d,]+)(?:\((\d+)\))?/);
+  return { count: matched ? toNumber(matched[1]) : 0, limit: matched?.[2] ? Number(matched[2]) : 0 };
+}
+
+/**
+ * 一次取得當日大盤概況與全部上市個股收盤行情；當天非交易日時往前尋找最近的交易日。
+ * 指數、成交統計、漲跌家數與個股報價都來自同一個請求。
+ */
+export async function fetchMarketSnapshot(today = new Date(), lookbackDays = 10): Promise<MarketSnapshot> {
   for (let offset = 0; offset <= lookbackDays; offset += 1) {
     const day = new Date(today.getFullYear(), today.getMonth(), today.getDate() - offset);
     const response = await fetch(`${MI_INDEX}?response=json&date=${toYmd(day)}&type=ALLBUT0999`);
     if (!response.ok) continue;
     const payload = await response.json() as { stat?: string; tables?: { fields?: string[]; data?: string[][] }[] };
     if (payload.stat !== 'OK') continue;
-    const table = payload.tables?.find((item) => item.fields?.[0] === '證券代號');
+    const tables = payload.tables ?? [];
     const quotes: Record<string, DailyQuote> = {};
-    for (const row of table?.data ?? []) {
+    for (const row of tables.find((item) => item.fields?.[0] === '證券代號')?.data ?? []) {
       const quote = parseQuoteRow(row);
       if (quote) quotes[quote.code] = quote;
     }
-    if (Object.keys(quotes).length) return { date: toYmd(day), quotes };
+    if (!Object.keys(quotes).length) continue;
+
+    const indices = tables
+      .filter((item) => item.fields?.[0] === '指數')
+      .flatMap((item) => item.data ?? [])
+      .map(parseIndexRow)
+      .filter((item): item is MarketIndex => item !== null);
+
+    const breadthRows = tables.find((item) => item.fields?.[0] === '類型')?.data ?? [];
+    const cellFor = (label: string) => parseBreadthCell(breadthRows.find((row) => row[0].startsWith(label))?.[2] ?? '');
+    const rising = cellFor('上漲');
+    const falling = cellFor('下跌');
+    const breadth = breadthRows.length
+      ? { up: rising.count, upLimit: rising.limit, down: falling.count, downLimit: falling.limit, flat: cellFor('持平').count }
+      : null;
+
+    const totalRow = (tables.find((item) => item.fields?.[0] === '成交統計')?.data ?? [])
+      .find((row) => row[0].startsWith('證券合計'));
+    const turnover = totalRow
+      ? { amount: toNumber(totalRow[1]), shares: toNumber(totalRow[2]), trades: toNumber(totalRow[3]) }
+      : null;
+
+    return { date: toYmd(day), quotes, indices, breadth, turnover };
   }
   throw new Error('無法取得當日收盤行情');
+}
+
+export type InstitutionalFlow = {
+  code: string;
+  name: string;
+  /** 外資（外陸資 + 外資自營商），單位為張。 */
+  foreign: number;
+  trust: number;
+  dealer: number;
+  total: number;
+};
+
+const T86 = 'https://www.twse.com.tw/fund/T86';
+
+const toLots = (value: string) => toNumber(value) / 1000;
+
+/** 三大法人買賣超日報只有代號、名稱與各法人的買賣超股數。 */
+export function parseFlowRow(row: string[]): InstitutionalFlow | null {
+  const code = row[0]?.trim() ?? '';
+  if (!/^\d{4}$/.test(code)) return null;
+  const foreign = toLots(row[4]) + toLots(row[7]);
+  const trust = toLots(row[10]);
+  const dealer = toLots(row[11]);
+  const total = toLots(row[18]);
+  if (![foreign, trust, dealer, total].every(Number.isFinite)) return null;
+  return { code, name: row[1].trim(), foreign, trust, dealer, total };
+}
+
+/** 指定交易日的三大法人買賣超（單位：張），只保留 4 位數代號的上市個股。 */
+export async function fetchInstitutionalFlows(date: string): Promise<InstitutionalFlow[]> {
+  const response = await fetch(`${T86}?response=json&date=${date}&selectType=ALL`);
+  if (!response.ok) throw new Error('三大法人資料暫時無法讀取');
+  const payload = await response.json() as { stat?: string; data?: string[][] };
+  if (payload.stat !== 'OK') throw new Error('當日沒有三大法人買賣超資料');
+  const flows = (payload.data ?? []).map(parseFlowRow).filter((item): item is InstitutionalFlow => item !== null);
+  if (!flows.length) throw new Error('當日沒有三大法人買賣超資料');
+  return flows;
 }
