@@ -9,8 +9,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-
-type Candle = { date: string; open: number; high: number; low: number; close: number };
+import { fetchOfficialStock, type Candle } from '@/lib/twse';
 
 type Stock = {
   code: string;
@@ -90,34 +89,12 @@ export default function Home() {
     setSearchOpen(false);
     setNotice(`正在向證交所公開資料查詢 ${code}…`);
     try {
-      const today = new Date();
-      const monthStarts = [0, 1, 2].map((offset) => {
-        const date = new Date(today.getFullYear(), today.getMonth() - offset, 1);
-        return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}01`;
-      });
-      const [companies, ...monthlyResults] = await Promise.all([
-        fetch('https://openapi.twse.com.tw/v1/opendata/t187ap03_L').then((response) => {
-          if (!response.ok) throw new Error('公司資料暫時無法讀取');
-          return response.json();
-        }),
-        ...monthStarts.map((date) => fetch(`https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${date}&stockNo=${code}`).then((response) => response.json())),
-      ]);
-      const company = companies.find((item: Record<string, string>) => item['公司代號'] === code);
-      if (!company) throw new Error('找不到此上市股票代號');
-      const candles = monthlyResults.flatMap((result: { stat?: string; data?: string[][] }) => (result.stat === 'OK' ? result.data ?? [] : [])).map((row) => ({
-        date: row[0], open: Number(row[3].replace(/,/g, '')), high: Number(row[4].replace(/,/g, '')),
-        low: Number(row[5].replace(/,/g, '')), close: Number(row[6].replace(/,/g, '')),
-      })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every(Number.isFinite));
-      if (!candles.length) throw new Error('此股票目前沒有可用的日成交資料');
-      const latest = candles[candles.length - 1];
-      const previous = candles[candles.length - 2] ?? latest;
-      const totalVolume = monthlyResults.at(0)?.data?.at(-1)?.[1]?.replace(/,/g, '') ?? '0';
+      const official = await fetchOfficialStock(code);
       selectStock({
-        code, name: company['公司簡稱'] || company['公司名稱'], price: latest.close,
-        change: Number((latest.close - previous.close).toFixed(2)), volume: `${Math.round(Number(totalVolume) / 1000).toLocaleString('zh-TW')} 張`,
-        industry: '上市公司', chips: { foreign: '待載入', trust: '待載入', dealer: '待載入' }, candles, official: true,
+        ...official, industry: '上市公司',
+        chips: { foreign: '待載入', trust: '待載入', dealer: '待載入' }, official: true,
       });
-      setNotice(`已載入 ${code} ${company['公司簡稱'] || company['公司名稱']}。價格與日 K 線來自證交所公開日成交資料。`);
+      setNotice(`已載入 ${official.code} ${official.name}。價格與日 K 線來自證交所公開日成交資料。`);
     } catch (error) {
       setNotice(`${error instanceof Error ? error.message : '查詢暫時失敗'}。目前僅支援上市股票，請稍後再試。`);
     } finally {
@@ -174,9 +151,10 @@ export default function Home() {
 }
 
 function StockSummary({ stock, up, onWatch }: { stock: Stock; up: boolean; onWatch: () => void }) {
-  const open = stock.price - stock.change * 0.72;
-  const high = stock.price + Math.abs(stock.change) * 0.56 + stock.price * 0.003;
-  const low = stock.price - Math.abs(stock.change) * 0.62 - stock.price * 0.002;
+  const latest = stock.candles?.at(-1);
+  const open = latest?.open ?? stock.price - stock.change * 0.72;
+  const high = latest?.high ?? stock.price + Math.abs(stock.change) * 0.56 + stock.price * 0.003;
+  const low = latest?.low ?? stock.price - Math.abs(stock.change) * 0.62 - stock.price * 0.002;
   const percent = stock.change / (stock.price - stock.change) * 100;
   return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label="加入自選" onClick={onWatch} className="mt-1 rounded-lg p-1.5 text-[#d7a738] hover:bg-[#d7a738]/10"><Star className="size-5 fill-current" /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">{stock.official ? '證交所公開日成交資料 · 非盤中即時報價' : '示範資料 · 收盤後資料接入後將顯示實際更新時間'}</p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={open.toFixed(1)} /><Quote label="最高" value={high.toFixed(1)} /><Quote label="最低" value={low.toFixed(1)} /><Quote label="總量" value={stock.volume} /></div></section>;
 }
