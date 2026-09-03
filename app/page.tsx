@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, Bell, Building2, ChevronDown, ExternalLink, Landmark,
   Menu, Search, ShieldAlert, Star, TrendingDown, TrendingUp, Users,
@@ -27,16 +27,27 @@ const stockList: Stock[] = [
   { code: '2382', name: '廣達', price: 312, change: 3, volume: '12,408 張', industry: '電腦及週邊設備業', chips: { foreign: '+1,120', trust: '+287', dealer: '+40' } },
   { code: '2303', name: '聯電', price: 48.3, change: 0.7, volume: '47,682 張', industry: '半導體業', chips: { foreign: '+2,304', trust: '-175', dealer: '+122' } },
   { code: '0050', name: '元大台灣50', price: 206.1, change: 1.4, volume: '18,740 張', industry: 'ETF', chips: { foreign: '+3,415', trust: '—', dealer: '+84' } },
+  { code: '2603', name: '長榮', price: 198.5, change: 2.5, volume: '22,406 張', industry: '航運業', chips: { foreign: '+1,042', trust: '+148', dealer: '-37' } },
+  { code: '2308', name: '台達電', price: 462, change: 8, volume: '9,318 張', industry: '電子零組件業', chips: { foreign: '+912', trust: '+166', dealer: '+21' } },
+  { code: '2881', name: '富邦金', price: 89.6, change: -0.4, volume: '14,682 張', industry: '金融保險業', chips: { foreign: '-628', trust: '+81', dealer: '-52' } },
+  { code: '2882', name: '國泰金', price: 72.8, change: 0.9, volume: '16,054 張', industry: '金融保險業', chips: { foreign: '+704', trust: '+126', dealer: '+18' } },
+  { code: '2886', name: '兆豐金', price: 42.4, change: 0.2, volume: '10,716 張', industry: '金融保險業', chips: { foreign: '+388', trust: '-44', dealer: '+33' } },
+  { code: '1301', name: '台塑', price: 45.2, change: -0.3, volume: '13,208 張', industry: '塑膠工業', chips: { foreign: '-364', trust: '+25', dealer: '-19' } },
+  { code: '1303', name: '南亞', price: 38.9, change: 0.4, volume: '11,572 張', industry: '塑膠工業', chips: { foreign: '+296', trust: '+41', dealer: '+15' } },
+  { code: '2002', name: '中鋼', price: 21.6, change: 0.1, volume: '31,860 張', industry: '鋼鐵工業', chips: { foreign: '+1,284', trust: '-92', dealer: '+76' } },
+  { code: '2412', name: '中華電', price: 128, change: 0.5, volume: '5,904 張', industry: '通信網路業', chips: { foreign: '+205', trust: '+74', dealer: '+11' } },
 ];
 
-const baseKline = [
-  ['08/14', 1143, 1151, 1138, 1148], ['08/15', 1147, 1158, 1143, 1155],
-  ['08/18', 1154, 1158, 1146, 1149], ['08/19', 1151, 1166, 1147, 1164],
-  ['08/20', 1165, 1169, 1157, 1161], ['08/21', 1160, 1174, 1158, 1171],
-  ['08/22', 1173, 1178, 1164, 1167], ['08/25', 1166, 1172, 1157, 1160],
-  ['08/26', 1162, 1175, 1159, 1172], ['08/27', 1170, 1180, 1168, 1177],
-  ['08/28', 1178, 1181, 1169, 1171], ['08/29', 1172, 1179, 1166, 1175],
-].map(([date, open, high, low, close]) => ({ date: String(date), open: Number(open), high: Number(high), low: Number(low), close: Number(close) }));
+const baseKline = Array.from({ length: 60 }, (_, index) => {
+  const trend = 1080 + index * 1.18 + Math.sin(index * 0.43) * 21;
+  const open = trend + Math.sin(index * 1.71) * 8;
+  const close = trend + Math.cos(index * 1.27) * 9;
+  const high = Math.max(open, close) + 5 + (index % 5) * 1.5;
+  const low = Math.min(open, close) - 5 - (index % 4) * 1.4;
+  const month = 6 + Math.floor(index / 20);
+  const day = (index % 20) + 1;
+  return { date: `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}`, open, high, low, close };
+});
 
 function klineFor(stock: Stock) {
   const factor = stock.price / 1175;
@@ -125,19 +136,21 @@ function StockSummary({ stock, up, onWatch }: { stock: Stock; up: boolean; onWat
 function KlinePanel({ stock }: { stock: Stock }) {
   const [range, setRange] = useState('20日');
   const fullData = useMemo(() => klineFor(stock), [stock]);
-  const data = range === '5日' ? fullData.slice(-5) : fullData;
-  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name}</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">目前顯示示範 OHLC 資料</span></div></section>;
+  const count = range === '5日' ? 5 : range === '20日' ? 20 : 60;
+  const data = fullData.slice(-count);
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name} · 顯示 {data.length} 根</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button type="button" key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">目前顯示示範 OHLC 資料</span></div></section>;
 }
 
 function CandlestickChart({ data }: { data: ReturnType<typeof klineFor> }) {
   const [hovered, setHovered] = useState(data.length - 1);
+  useEffect(() => setHovered(data.length - 1), [data]);
   const width = 760; const height = 310; const pad = { left: 48, right: 12, top: 16, bottom: 38 };
   const max = Math.max(...data.map((item) => item.high)); const min = Math.min(...data.map((item) => item.low)); const buffer = (max - min) * 0.14 || 1;
   const ceiling = max + buffer; const floor = min - buffer; const plotHeight = height - pad.top - pad.bottom; const plotWidth = width - pad.left - pad.right;
   const y = (value: number) => pad.top + (ceiling - value) / (ceiling - floor) * plotHeight;
-  const step = plotWidth / data.length; const candleWidth = Math.min(28, Math.max(8, step * 0.58)); const selected = data[hovered] ?? data[data.length - 1];
+  const step = plotWidth / data.length; const candleWidth = Math.min(28, Math.max(3, step * 0.58)); const selected = data[hovered] ?? data[data.length - 1];
   const ticks = [ceiling, (ceiling * 2 + floor) / 3, (ceiling + floor * 2) / 3, floor];
-  return <div className="relative h-[310px] w-full overflow-hidden"><svg role="img" aria-label="日 K 線圖" viewBox={`0 0 ${width} ${height}`} className="h-full w-full"><rect width={width} height={height} fill="transparent" />{ticks.map((tick) => <g key={tick}><line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" /><text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text></g>)}{data.map((item, index) => { const x = pad.left + step * index + step / 2; const rise = item.close >= item.open; const color = rise ? '#ff6d72' : '#24d6a5'; const bodyTop = y(Math.max(item.open, item.close)); const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close))); return <g key={item.date} onMouseEnter={() => setHovered(index)} className="cursor-crosshair"><rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={hovered === index ? '#ffffff08' : 'transparent'} /><line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" /><rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" /><text x={x} y={height - 16} fill="#718897" fontSize="10" textAnchor="middle">{index % Math.ceil(data.length / 6) === 0 || index === data.length - 1 ? item.date : ''}</text></g>; })}</svg><div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg"><span className="mr-3 text-[#879ca9]">{selected.date}</span>開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong></div></div>;
+  return <div className="relative h-[310px] w-full overflow-hidden"><svg role="img" aria-label="日 K 線圖" viewBox={`0 0 ${width} ${height}`} className="h-full w-full"><rect width={width} height={height} fill="transparent" />{ticks.map((tick) => <g key={tick}><line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" /><text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text></g>)}{data.map((item, index) => { const x = pad.left + step * index + step / 2; const rise = item.close >= item.open; const color = rise ? '#ff6d72' : '#24d6a5'; const bodyTop = y(Math.max(item.open, item.close)); const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close))); return <g key={item.date} onMouseEnter={() => setHovered(index)} onClick={() => setHovered(index)} onTouchStart={() => setHovered(index)} className="cursor-crosshair"><rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={hovered === index ? '#ffffff08' : 'transparent'} /><line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" /><rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" /><text x={x} y={height - 16} fill="#718897" fontSize="10" textAnchor="middle">{index % Math.ceil(data.length / 6) === 0 || index === data.length - 1 ? item.date : ''}</text></g>; })}</svg><div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg"><span className="mr-3 text-[#879ca9]">{selected.date}</span>開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong></div></div>;
 }
 
 function InstitutionPanel({ stock }: { stock: Stock }) {
