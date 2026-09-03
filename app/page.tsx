@@ -10,6 +10,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
+type Candle = { date: string; open: number; high: number; low: number; close: number };
+
 type Stock = {
   code: string;
   name: string;
@@ -18,6 +20,8 @@ type Stock = {
   volume: string;
   industry: string;
   chips: { foreign: string; trust: string; dealer: string };
+  candles?: Candle[];
+  official?: boolean;
 };
 
 const stockList: Stock[] = [
@@ -59,11 +63,11 @@ function klineFor(stock: Stock) {
 }
 
 export default function Home() {
-  const [activeCode, setActiveCode] = useState('2330');
+  const [stock, setStock] = useState<Stock>(stockList[0]);
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
+  const [lookupLoading, setLookupLoading] = useState(false);
   const [notice, setNotice] = useState('目前為公開資料版介面；盤中即時行情與即時籌碼需串接合法資料服務。');
-  const stock = stockList.find((item) => item.code === activeCode) ?? stockList[0];
   const isUp = stock.change >= 0;
   const matches = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -71,16 +75,60 @@ export default function Home() {
   }, [query]);
 
   function selectStock(next: Stock) {
-    setActiveCode(next.code);
+    setStock(next);
     setQuery('');
     setSearchOpen(false);
     setNotice(`已載入 ${next.code} ${next.name}。K 線與籌碼資料目前為介面示範。`);
   }
 
-  function submitSearch(event: React.FormEvent) {
+  async function lookupOfficialStock(code: string) {
+    if (!/^\d{4}$/.test(code)) {
+      setNotice('請輸入 4 位上市股票代號，例如 2486、2330。');
+      return;
+    }
+    setLookupLoading(true);
+    setSearchOpen(false);
+    setNotice(`正在向證交所公開資料查詢 ${code}…`);
+    try {
+      const today = new Date();
+      const monthStarts = [0, 1, 2].map((offset) => {
+        const date = new Date(today.getFullYear(), today.getMonth() - offset, 1);
+        return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}01`;
+      });
+      const [companies, ...monthlyResults] = await Promise.all([
+        fetch('https://openapi.twse.com.tw/v1/opendata/t187ap03_L').then((response) => {
+          if (!response.ok) throw new Error('公司資料暫時無法讀取');
+          return response.json();
+        }),
+        ...monthStarts.map((date) => fetch(`https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${date}&stockNo=${code}`).then((response) => response.json())),
+      ]);
+      const company = companies.find((item: Record<string, string>) => item['公司代號'] === code);
+      if (!company) throw new Error('找不到此上市股票代號');
+      const candles = monthlyResults.flatMap((result: { stat?: string; data?: string[][] }) => (result.stat === 'OK' ? result.data ?? [] : [])).map((row) => ({
+        date: row[0], open: Number(row[3].replace(/,/g, '')), high: Number(row[4].replace(/,/g, '')),
+        low: Number(row[5].replace(/,/g, '')), close: Number(row[6].replace(/,/g, '')),
+      })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every(Number.isFinite));
+      if (!candles.length) throw new Error('此股票目前沒有可用的日成交資料');
+      const latest = candles[candles.length - 1];
+      const previous = candles[candles.length - 2] ?? latest;
+      const totalVolume = monthlyResults.at(0)?.data?.at(-1)?.[1]?.replace(/,/g, '') ?? '0';
+      selectStock({
+        code, name: company['公司簡稱'] || company['公司名稱'], price: latest.close,
+        change: Number((latest.close - previous.close).toFixed(2)), volume: `${Math.round(Number(totalVolume) / 1000).toLocaleString('zh-TW')} 張`,
+        industry: '上市公司', chips: { foreign: '待載入', trust: '待載入', dealer: '待載入' }, candles, official: true,
+      });
+      setNotice(`已載入 ${code} ${company['公司簡稱'] || company['公司名稱']}。價格與日 K 線來自證交所公開日成交資料。`);
+    } catch (error) {
+      setNotice(`${error instanceof Error ? error.message : '查詢暫時失敗'}。目前僅支援上市股票，請稍後再試。`);
+    } finally {
+      setLookupLoading(false);
+    }
+  }
+
+  async function submitSearch(event: React.FormEvent) {
     event.preventDefault();
     if (matches[0]) selectStock(matches[0]);
-    else setNotice('找不到符合的股票，請輸入代號或名稱，例如 2330、台積電、0050。');
+    else await lookupOfficialStock(query.trim());
   }
 
   return (
@@ -96,8 +144,8 @@ export default function Home() {
           </nav>
           <form onSubmit={submitSearch} className="relative ml-auto flex w-full max-w-md items-center gap-2">
             <label className="relative block min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[#76909f]" /><Input aria-label="查詢股票代號或名稱" value={query} onFocus={() => setSearchOpen(true)} onChange={(event) => { setQuery(event.target.value); setSearchOpen(true); }} placeholder="查詢代號或名稱，例如 2330" className="h-10 border-white/10 bg-white/6 pl-9 text-sm text-white placeholder:text-[#78909e]" /></label>
-            <Button type="submit" className="h-10 bg-[#24d6a5] px-4 text-[#06201c] hover:bg-[#5ce6bf]">查詢</Button>
-            {searchOpen && <div className="absolute left-0 top-11 z-50 w-[calc(100%-74px)] overflow-hidden rounded-xl border border-white/10 bg-[#102638] shadow-2xl">{matches.length ? matches.slice(0, 6).map((item) => <button type="button" key={item.code} onMouseDown={(event) => event.preventDefault()} onClick={() => selectStock(item)} className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-white/7"><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#a9bbc5]">{item.code}</span><span className="flex-1 text-sm">{item.name}</span><span className="font-mono text-xs text-[#8fa5b2]">{item.price.toLocaleString('zh-TW')}</span></button>) : <p className="px-3 py-3 text-sm text-[#93a7b3]">沒有符合的股票</p>}</div>}
+            <Button type="submit" disabled={lookupLoading} className="h-10 bg-[#24d6a5] px-4 text-[#06201c] hover:bg-[#5ce6bf]">{lookupLoading ? '查詢中' : '查詢'}</Button>
+            {searchOpen && <div className="absolute left-0 top-11 z-50 w-[calc(100%-74px)] overflow-hidden rounded-xl border border-white/10 bg-[#102638] shadow-2xl">{matches.length ? matches.slice(0, 6).map((item) => <button type="button" key={item.code} onMouseDown={(event) => event.preventDefault()} onClick={() => selectStock(item)} className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-white/7"><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#a9bbc5]">{item.code}</span><span className="flex-1 text-sm">{item.name}</span><span className="font-mono text-xs text-[#8fa5b2]">{item.price.toLocaleString('zh-TW')}</span></button>) : /^\d{4}$/.test(query.trim()) ? <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void lookupOfficialStock(query.trim())} className="flex w-full items-center gap-3 px-3 py-3 text-left text-sm hover:bg-white/7"><Search className="size-4 text-[#64dfbb]" /><span>查詢 <strong className="font-mono">{query.trim()}</strong> 的證交所公開資料</span></button> : <p className="px-3 py-3 text-sm text-[#93a7b3]">請輸入完整 4 位代號，或名稱關鍵字</p>}</div>}
           </form>
           <Button variant="ghost" size="icon" className="hidden text-[#a6b8c4] md:inline-flex" aria-label="通知"><Bell /></Button><Button variant="ghost" size="icon" className="text-[#a6b8c4] lg:hidden" aria-label="選單"><Menu /></Button>
         </div>
@@ -115,7 +163,7 @@ export default function Home() {
             <OwnershipPanel />
           </div>
           <aside className="space-y-5">
-            <Watchlist activeCode={activeCode} onSelect={selectStock} />
+            <Watchlist activeCode={stock.code} onSelect={selectStock} />
             <SignalPanel />
             <section className="rounded-2xl border border-[#d7a738]/20 bg-gradient-to-br from-[#1e2a2b] to-[#0b1d2c] p-5"><p className="text-[10px] font-semibold tracking-[.14em] text-[#d7c479]">資料服務接入</p><h2 className="mt-2 text-base font-semibold">下一步：公開資料查詢</h2><p className="mt-2 text-xs leading-5 text-[#9cafb9]">可先接日收盤、法人買賣超與集保週資料；授權 API 則可再擴充盤中報價。</p><button className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-[#6ee5c1] hover:underline" onClick={() => setNotice('免費公開資料版可提供日資料與週籌碼；盤中逐筆行情需另行授權。')}>查看資料層級 <ChevronDown className="size-3 -rotate-90" /></button></section>
           </aside>
@@ -130,18 +178,18 @@ function StockSummary({ stock, up, onWatch }: { stock: Stock; up: boolean; onWat
   const high = stock.price + Math.abs(stock.change) * 0.56 + stock.price * 0.003;
   const low = stock.price - Math.abs(stock.change) * 0.62 - stock.price * 0.002;
   const percent = stock.change / (stock.price - stock.change) * 100;
-  return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label="加入自選" onClick={onWatch} className="mt-1 rounded-lg p-1.5 text-[#d7a738] hover:bg-[#d7a738]/10"><Star className="size-5 fill-current" /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">示範資料 · 收盤後資料接入後將顯示實際更新時間</p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={open.toFixed(1)} /><Quote label="最高" value={high.toFixed(1)} /><Quote label="最低" value={low.toFixed(1)} /><Quote label="總量" value={stock.volume} /></div></section>;
+  return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label="加入自選" onClick={onWatch} className="mt-1 rounded-lg p-1.5 text-[#d7a738] hover:bg-[#d7a738]/10"><Star className="size-5 fill-current" /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">{stock.official ? '證交所公開日成交資料 · 非盤中即時報價' : '示範資料 · 收盤後資料接入後將顯示實際更新時間'}</p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={open.toFixed(1)} /><Quote label="最高" value={high.toFixed(1)} /><Quote label="最低" value={low.toFixed(1)} /><Quote label="總量" value={stock.volume} /></div></section>;
 }
 
 function KlinePanel({ stock }: { stock: Stock }) {
   const [range, setRange] = useState('20日');
-  const fullData = useMemo(() => klineFor(stock), [stock]);
+  const fullData = useMemo(() => stock.candles ?? klineFor(stock), [stock]);
   const count = range === '5日' ? 5 : range === '20日' ? 20 : 60;
   const data = fullData.slice(-count);
-  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name} · 顯示 {data.length} 根</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button type="button" key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">目前顯示示範 OHLC 資料</span></div></section>;
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name} · 顯示 {data.length} 根</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button type="button" key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">{stock.official ? '證交所公開日成交資料' : '目前顯示示範 OHLC 資料'}</span></div></section>;
 }
 
-function CandlestickChart({ data }: { data: ReturnType<typeof klineFor> }) {
+function CandlestickChart({ data }: { data: Candle[] }) {
   const [hovered, setHovered] = useState(data.length - 1);
   useEffect(() => setHovered(data.length - 1), [data]);
   const width = 760; const height = 310; const pad = { left: 48, right: 12, top: 16, bottom: 38 };
