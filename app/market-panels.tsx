@@ -20,8 +20,8 @@ function Loading({ label }: { label: string }) {
   return <section className="grid h-64 place-items-center rounded-2xl border border-white/8 bg-[#0b1d2c] text-sm text-[#8197a5]">{label}</section>;
 }
 
-export function MarketOverview({ snapshot, onSelect }: { snapshot: MarketSnapshot | null; onSelect: (code: string) => void }) {
-  if (!snapshot) return <Loading label="正在載入大盤資料…" />;
+export function MarketOverview({ snapshot, error, onSelect }: { snapshot: MarketSnapshot | null; error: string; onSelect: (code: string) => void }) {
+  if (!snapshot) return <Loading label={error || '正在載入大盤資料…'} />;
   const weighted = snapshot.indices.find((item) => item.name.includes('發行量加權股價指數'));
   const others = snapshot.indices.filter((item) => item.name !== weighted?.name).slice(0, 6);
   const { breadth, turnover } = snapshot;
