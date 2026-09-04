@@ -17,7 +17,7 @@ import {
 import { readWatchlist, searchStocks, type StockOption, writeWatchlist } from '@/lib/watchlist';
 
 /** 每次要部署時手動遞增，方便從畫面確認線上版本是否已更新。 */
-const APP_VERSION = 'v2026.09.04-1';
+const APP_VERSION = 'v2026.09.04-2';
 
 type Seed = {
   code: string;
@@ -67,8 +67,12 @@ function toStock(official: OfficialStock): Stock {
 export default function Home() {
   const [stock, setStock] = useState<Stock | null>(null);
   const [snapshot, setSnapshot] = useState<MarketSnapshot | null>(null);
-  const [flows, setFlows] = useState<InstitutionalFlow[] | null>(null);
-  const [flowError, setFlowError] = useState('');
+  // 三大法人日報以交易日為單位快取，點不同 K 棒時才不用重抓同一天。
+  const [flowsByDate, setFlowsByDate] = useState<Record<string, InstitutionalFlow[]>>({});
+  // 錯誤也要跟著日期記，否則換回有資料的日期時會留著前一天的錯誤訊息。
+  const [flowErrors, setFlowErrors] = useState<Record<string, string>>({});
+  const [dataError, setDataError] = useState('');
+  const [flowDate, setFlowDate] = useState('');
   const [view, setView] = useState<View>('個股研究');
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
@@ -79,6 +83,11 @@ export default function Home() {
   // 每次 render 都建新物件會讓下方的 useMemo 失效，跟著快照一起記住即可。
   const quotes = useMemo(() => snapshot?.quotes ?? {}, [snapshot]);
   const quoteDate = snapshot?.date ?? '';
+  // 沒有指定日期時，看的就是最近一個交易日。
+  const activeFlowDate = flowDate || quoteDate;
+  const flows = flowsByDate[activeFlowDate] ?? null;
+  const flowError = flowErrors[activeFlowDate] ?? '';
+  const latestFlows = flowsByDate[quoteDate] ?? null;
   const isUp = (stock?.change ?? 0) >= 0;
   const watched = !!stock && watchlist.includes(stock.code);
 
@@ -119,15 +128,26 @@ export default function Home() {
 
   useEffect(() => {
     fetchMarketSnapshot()
-      .then((market) => {
-        setSnapshot(market);
-        // 三大法人日報約 300KB，等大盤資料到齊後再背景載入，避免拖慢首次顯示。
-        return fetchInstitutionalFlows(market.date).then(setFlows);
-      })
-      .catch((error: unknown) => setFlowError(error instanceof Error ? error.message : '證交所公開資料暫時無法讀取'));
+      .then(setSnapshot)
+      .catch((error: unknown) => setDataError(error instanceof Error ? error.message : '證交所公開資料暫時無法讀取'));
     void lookupOfficialStock(seeds[0].code);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 三大法人日報約 300KB，等知道要看哪一天之後才載入，並且一天只抓一次。
+  useEffect(() => {
+    if (!activeFlowDate || flowsByDate[activeFlowDate] || flowErrors[activeFlowDate]) return;
+    let cancelled = false;
+    fetchInstitutionalFlows(activeFlowDate)
+      .then((list) => {
+        if (!cancelled) setFlowsByDate((cache) => ({ ...cache, [activeFlowDate]: list }));
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : '三大法人資料暫時無法讀取';
+        if (!cancelled) setFlowErrors((cache) => ({ ...cache, [activeFlowDate]: message }));
+      });
+    return () => { cancelled = true; };
+  }, [activeFlowDate, flowsByDate, flowErrors]);
 
   // 靜態網站會先產出預設清單的 HTML，所以掛載後才讀本機資料，避免 hydration 不一致。
   useEffect(() => {
@@ -185,14 +205,14 @@ export default function Home() {
         <div role="status" className="mb-5 flex items-center gap-2 rounded-lg border border-[#d7a738]/20 bg-[#d7a738]/8 px-3 py-2 text-xs text-[#dcc979]"><ShieldAlert className="size-3.5" />{notice}</div>
         <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
           <div className="space-y-5">
-            {view === '市場總覽' ? <MarketOverview snapshot={snapshot} onSelect={openStock} />
-              : view === '籌碼排行' ? <FlowRanking flows={flows} quotes={quotes} quoteDate={quoteDate} error={flowError} onSelect={openStock} />
+            {view === '市場總覽' ? <MarketOverview snapshot={snapshot} error={dataError} onSelect={openStock} />
+              : view === '籌碼排行' ? <FlowRanking flows={latestFlows} quotes={quotes} quoteDate={quoteDate} error={dataError || (flowErrors[quoteDate] ?? '')} onSelect={openStock} />
               : <>
                 {stock ? <>
                   <StockSummary stock={stock} up={isUp} watched={watched} onWatch={() => toggleWatch(stock.code, stock.name)} />
                   <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.55fr)_minmax(370px,1fr)]">
-                    <KlinePanel stock={stock} />
-                    <InstitutionPanel stock={stock} flow={flows?.find((item) => item.code === stock.code) ?? null} loaded={flows !== null} date={quoteDate} error={flowError} />
+                    <KlinePanel stock={stock} selectedDate={activeFlowDate} onPickDate={setFlowDate} />
+                    <InstitutionPanel stock={stock} flow={flows?.find((item) => item.code === stock.code) ?? null} loaded={flows !== null} date={activeFlowDate} latest={activeFlowDate === quoteDate} error={dataError || flowError} onLatest={() => setFlowDate('')} />
                   </section>
                 </> : <section className="grid h-64 place-items-center rounded-2xl border border-white/8 bg-[#0b1d2c] text-sm text-[#8197a5]">正在載入證交所公開日成交資料…</section>}
                 <OwnershipPanel />
@@ -215,15 +235,15 @@ function StockSummary({ stock, up, watched, onWatch }: { stock: Stock; up: boole
   return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label={watched ? '移出自選清單' : '加入自選清單'} aria-pressed={watched} title={watched ? '移出自選清單' : '加入自選清單'} onClick={onWatch} className={`mt-1 rounded-lg p-1.5 hover:bg-[#d7a738]/10 ${watched ? 'text-[#d7a738]' : 'text-[#6f8593]'}`}><Star className={`size-5 ${watched ? 'fill-current' : ''}`} /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">證交所公開日成交資料 · 非盤中即時報價{latest ? ` · ${latest.date}` : ''}</p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={latest?.open.toFixed(1) ?? '—'} /><Quote label="最高" value={latest?.high.toFixed(1) ?? '—'} /><Quote label="最低" value={latest?.low.toFixed(1) ?? '—'} /><Quote label="總量" value={stock.volume} /></div></section>;
 }
 
-function KlinePanel({ stock }: { stock: Stock }) {
+function KlinePanel({ stock, selectedDate, onPickDate }: { stock: Stock; selectedDate: string; onPickDate: (ymd: string) => void }) {
   const [range, setRange] = useState('20日');
   const fullData = stock.candles;
   const count = range === '5日' ? 5 : range === '20日' ? 20 : 60;
   const data = fullData.slice(-count);
-  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name} · 顯示 {data.length} 根</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button type="button" key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">證交所公開日成交資料</span></div></section>;
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name} · 顯示 {data.length} 根 · 點 K 棒可看該日法人買賣超</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button type="button" key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} selectedDate={selectedDate} onPick={onPickDate} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">證交所公開日成交資料</span></div></section>;
 }
 
-function CandlestickChart({ data }: { data: Candle[] }) {
+function CandlestickChart({ data, selectedDate, onPick }: { data: Candle[]; selectedDate: string; onPick: (ymd: string) => void }) {
   const [hovered, setHovered] = useState(data.length - 1);
   useEffect(() => setHovered(data.length - 1), [data]);
   const width = 760; const height = 310; const pad = { left: 48, right: 12, top: 16, bottom: 38 };
@@ -232,18 +252,36 @@ function CandlestickChart({ data }: { data: Candle[] }) {
   const y = (value: number) => pad.top + (ceiling - value) / (ceiling - floor) * plotHeight;
   const step = plotWidth / data.length; const candleWidth = Math.min(28, Math.max(3, step * 0.58)); const selected = data[hovered] ?? data[data.length - 1];
   const ticks = [ceiling, (ceiling * 2 + floor) / 3, (ceiling + floor * 2) / 3, floor];
-  return <div className="relative h-[310px] w-full overflow-hidden"><svg role="img" aria-label="日 K 線圖" viewBox={`0 0 ${width} ${height}`} className="h-full w-full"><rect width={width} height={height} fill="transparent" />{ticks.map((tick) => <g key={tick}><line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" /><text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text></g>)}{data.map((item, index) => { const x = pad.left + step * index + step / 2; const rise = item.close >= item.open; const color = rise ? '#ff6d72' : '#24d6a5'; const bodyTop = y(Math.max(item.open, item.close)); const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close))); return <g key={item.date} onMouseEnter={() => setHovered(index)} onClick={() => setHovered(index)} onTouchStart={() => setHovered(index)} className="cursor-crosshair"><rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={hovered === index ? '#ffffff08' : 'transparent'} /><line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" /><rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" /><text x={x} y={height - 16} fill="#718897" fontSize="10" textAnchor="middle">{index % Math.ceil(data.length / 6) === 0 || index === data.length - 1 ? item.date : ''}</text></g>; })}</svg><div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg"><span className="mr-3 text-[#879ca9]">{selected.date}</span>開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong></div></div>;
+  return <div className="relative h-[310px] w-full overflow-hidden"><svg role="img" aria-label="日 K 線圖" viewBox={`0 0 ${width} ${height}`} className="h-full w-full"><rect width={width} height={height} fill="transparent" />{ticks.map((tick) => <g key={tick}><line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" /><text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text></g>)}{data.map((item, index) => { const x = pad.left + step * index + step / 2; const rise = item.close >= item.open; const color = rise ? '#ff6d72' : '#24d6a5'; const bodyTop = y(Math.max(item.open, item.close)); const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close))); const picked = item.ymd !== '' && item.ymd === selectedDate; return <g key={item.ymd || item.date} onMouseEnter={() => setHovered(index)} onClick={() => { setHovered(index); onPick(item.ymd); }} onTouchStart={() => { setHovered(index); onPick(item.ymd); }} className="cursor-pointer"><rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={picked ? '#24d6a51e' : hovered === index ? '#ffffff08' : 'transparent'} />{picked && <rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill="none" stroke="#24d6a5" strokeWidth="1" />}<line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" /><rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" /><text x={x} y={height - 16} fill="#718897" fontSize="10" textAnchor="middle">{index % Math.ceil(data.length / 6) === 0 || index === data.length - 1 ? item.date : ''}</text></g>; })}</svg><div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg"><span className="mr-3 text-[#879ca9]">{selected.date}</span>開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong></div></div>;
 }
 
-function InstitutionPanel({ stock, flow, loaded, date, error }: { stock: Stock; flow: InstitutionalFlow | null; loaded: boolean; date: string; error: string }) {
+function InstitutionPanel({ stock, flow, loaded, date, latest, error, onLatest }: { stock: Stock; flow: InstitutionalFlow | null; loaded: boolean; date: string; latest: boolean; error: string; onLatest: () => void }) {
   const rows = [{ title: '外資', value: flow?.foreign, icon: Building2 }, { title: '投信', value: flow?.trust, icon: Landmark }, { title: '自營商', value: flow?.dealer, icon: WalletCards }];
   const scale = Math.max(...rows.map((row) => Math.abs(row.value ?? 0)), 1);
   // 三大法人日報是收盤後才公布的日資料，所以一定要標出是哪一個交易日。
   const status = error ? error : loaded ? (flow ? '證交所三大法人日報' : '當日無買賣超資料') : '載入中…';
-  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex flex-wrap items-start justify-between gap-2"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">法人買賣超</h2>{date && <span className="rounded-md bg-[#24d6a5]/12 px-2 py-0.5 font-mono text-[11px] text-[#6ee5c1]">{formatDate(date)} 收盤後</span>}</div><p className="mt-1 text-xs text-[#8197a5]">單位：張 · {stock.code} {stock.name}</p></div><span className={`text-xs ${error ? 'text-[#e2b45f]' : 'text-[#64dfbb]'}`}>{status}</span></div><div className="mt-5 space-y-4">{rows.map(({ title, value, icon: Icon }) => { const buying = (value ?? 0) >= 0; return <div key={title} className="flex items-center gap-3"><span className={`grid size-9 place-items-center rounded-lg ${buying ? 'bg-[#ff6d72]/10 text-[#ff8588]' : 'bg-[#24d6a5]/10 text-[#55e6bc]'}`}><Icon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex justify-between text-sm"><span>{title}</span><strong className={`font-mono ${buying ? 'text-[#ff8588]' : 'text-[#55e6bc]'}`}>{value === undefined ? '—' : lots(value)}<small className="ml-1 font-normal text-[#8197a5]">張</small></strong></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/7"><i className={`block h-full rounded-full ${buying ? 'bg-[#ff6d72]' : 'bg-[#24d6a5]'}`} style={{ width: `${Math.min(100, Math.abs(value ?? 0) / scale * 100)}%` }} /></div></div></div>; })}</div><div className="mt-6 rounded-xl border border-[#24d6a5]/14 bg-[#24d6a5]/5 p-3"><p className="text-xs font-medium text-[#75e8c7]">三大法人合計 {flow ? `${lots(flow.total)} 張` : '—'}</p><p className="mt-1.5 text-[11px] text-[#8ca1ad]">{date ? `資料日期 ${formatDate(date)}，為當日收盤後公布的日報，非盤中即時買賣超。` : '資料為收盤後公布的日報，非盤中即時買賣超。'}僅作為觀察指標，非買賣建議。</p></div></section>;
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex flex-wrap items-start justify-between gap-2"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">法人買賣超</h2>{date && <span className="rounded-md bg-[#24d6a5]/12 px-2 py-0.5 font-mono text-[11px] text-[#6ee5c1]">{formatDate(date)} 收盤後</span>}{!latest && <button type="button" onClick={onLatest} className="rounded-md border border-white/12 px-2 py-0.5 text-[11px] text-[#9db0ba] hover:bg-white/6">回到最新</button>}</div><p className="mt-1 text-xs text-[#8197a5]">單位：張 · {stock.code} {stock.name} · 點左側 K 棒可換日期</p></div><span className={`text-xs ${error ? 'text-[#e2b45f]' : 'text-[#64dfbb]'}`}>{status}</span></div><div className="mt-5 space-y-4">{rows.map(({ title, value, icon: Icon }) => { const buying = (value ?? 0) >= 0; return <div key={title} className="flex items-center gap-3"><span className={`grid size-9 place-items-center rounded-lg ${buying ? 'bg-[#ff6d72]/10 text-[#ff8588]' : 'bg-[#24d6a5]/10 text-[#55e6bc]'}`}><Icon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex justify-between text-sm"><span>{title}</span><strong className={`font-mono ${buying ? 'text-[#ff8588]' : 'text-[#55e6bc]'}`}>{value === undefined ? '—' : lots(value)}<small className="ml-1 font-normal text-[#8197a5]">張</small></strong></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/7"><i className={`block h-full rounded-full ${buying ? 'bg-[#ff6d72]' : 'bg-[#24d6a5]'}`} style={{ width: `${Math.min(100, Math.abs(value ?? 0) / scale * 100)}%` }} /></div></div></div>; })}</div><div className="mt-6 rounded-xl border border-[#24d6a5]/14 bg-[#24d6a5]/5 p-3"><p className="text-xs font-medium text-[#75e8c7]">三大法人合計 {flow ? `${lots(flow.total)} 張` : '—'}</p><p className="mt-1.5 text-[11px] text-[#8ca1ad]">{date ? `資料日期 ${formatDate(date)}${latest ? '（最近交易日）' : ''}，為當日收盤後公布的日報，非盤中即時買賣超。` : '資料為收盤後公布的日報，非盤中即時買賣超。'}僅作為觀察指標，非買賣建議。</p></div></section>;
 }
 
-function OwnershipPanel() { const rows = [['大戶 (≥400張)', '7,482', '+1,926', '69%', '偏多累積', true], ['中實戶 (100–399張)', '12,460', '+642', '56%', '偏多累積', true], ['散戶 (<100張)', '38,915', '-2,568', '44%', '偏空調節', false]]; return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><Users className="size-4 text-[#d7a738]" /><h2 className="font-semibold">大戶 / 散戶籌碼</h2></div><p className="mt-1 text-xs text-[#8197a5]">依持股級距觀察集保戶數與持股集中度</p></div><span className="rounded-full border border-[#d7a738]/20 bg-[#d7a738]/10 px-2.5 py-1 text-[10px] text-[#e7d17f]">公開資料為週資料</span></div><div className="mt-5 overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead className="border-b border-white/8 text-[11px] tracking-wide text-[#728998]"><tr><th className="pb-3 font-medium">投資人級距</th><th className="pb-3 text-right font-medium">持股人數</th><th className="pb-3 text-right font-medium">本週增減</th><th className="pb-3 text-right font-medium">持股集中度</th><th className="pb-3 pl-6 font-medium">籌碼傾向</th></tr></thead><tbody>{rows.map(([label, people, change, concentration, signal, up]) => <tr key={String(label)} className="border-b border-white/5 last:border-0"><td className="py-4 font-medium">{label}</td><td className="py-4 text-right font-mono text-[#afc0c9]">{people}</td><td className={`py-4 text-right font-mono ${up ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{change}</td><td className="py-4 text-right"><span className="font-mono">{concentration}</span><span className="ml-2 inline-block h-1.5 w-16 overflow-hidden rounded-full bg-white/7 align-middle"><i className={`block h-full rounded-full ${up ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} style={{ width: String(concentration) }} /></span></td><td className="py-4 pl-6"><span className={`rounded-md px-2 py-1 text-xs ${up ? 'bg-[#24d6a5]/10 text-[#5ce6bf]' : 'bg-[#ff6d72]/10 text-[#ff989a]'}`}>{signal}</span></td></tr>)}</tbody></table></div></section>; }
+/**
+ * 大戶／散戶籌碼要用集保結算所的股權分散表，目前尚未接入。
+ * 這裡原本放的是寫死的示範數字，跟個股與日期都無關，容易被誤讀成真實籌碼，因此改為明確標示尚未接入。
+ */
+function OwnershipPanel() {
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <div className="flex items-center gap-2"><Users className="size-4 text-[#d7a738]" /><h2 className="font-semibold">大戶 / 散戶籌碼</h2></div>
+        <p className="mt-1 text-xs text-[#8197a5]">依持股級距觀察集保戶數與持股集中度</p>
+      </div>
+      <span className="rounded-full border border-[#d7a738]/20 bg-[#d7a738]/10 px-2.5 py-1 text-[10px] text-[#e7d17f]">尚未接入資料來源</span>
+    </div>
+    <p className="mt-5 rounded-xl border border-dashed border-white/10 px-4 py-6 text-center text-xs leading-6 text-[#8197a5]">
+      這張表需要集保結算所的股權分散表（每週結算一次，與法人買賣超的日資料不同步）。<br />
+      資料來源接上之前先不顯示數字，以免與實際籌碼不符。
+    </p>
+  </section>;
+}
 
 function Watchlist({ codes, activeCode, quotes, quoteDate, onSelect, onRemove }: {
   codes: string[];

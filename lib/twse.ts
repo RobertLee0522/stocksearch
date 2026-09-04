@@ -1,4 +1,4 @@
-export type Candle = { date: string; open: number; high: number; low: number; close: number };
+export type Candle = { date: string; ymd: string; open: number; high: number; low: number; close: number };
 
 export type OfficialStock = {
   code: string;
@@ -34,6 +34,13 @@ export function toDisplayDate(rocDate: string) {
   return month && day ? `${month}/${day}` : rocDate;
 }
 
+/** 民國日期 115/08/03 轉為查詢其他日報用的 20260803。 */
+export function toWesternDate(rocDate: string) {
+  const [year, month, day] = rocDate.split('/');
+  const western = Number(year) + 1911;
+  return Number.isFinite(western) && month && day ? `${western}${month}${day}` : '';
+}
+
 /**
  * 只使用 www.twse.com.tw 的日成交資料（有回傳 access-control-allow-origin: *），
  * 避免 openapi.twse.com.tw 缺少 CORS 標頭導致瀏覽器直接擋下請求。
@@ -55,7 +62,7 @@ export async function fetchOfficialStock(code: string, today = new Date()): Prom
   const rows = listed.flatMap((month) => month.data ?? []).sort((a, b) => a[0].localeCompare(b[0]));
   const daily = rows.map((row) => ({
     candle: {
-      date: toDisplayDate(row[0]), open: toNumber(row[3]), high: toNumber(row[4]),
+      date: toDisplayDate(row[0]), ymd: toWesternDate(row[0]), open: toNumber(row[3]), high: toNumber(row[4]),
       low: toNumber(row[5]), close: toNumber(row[6]),
     },
     shares: toNumber(row[1]),
