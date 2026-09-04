@@ -242,12 +242,21 @@ export type MarginTrade = {
 
 const MI_MARGN = 'https://www.twse.com.tw/exchangeReport/MI_MARGN';
 
-/** 證交所這支報表有時把資料放在 tables，有時直接放在最外層，兩種都要能讀。 */
+/**
+ * 證交所這支報表有時把資料放在 tables，有時直接放在最外層，兩種都要能讀；
+ * 而且欄名可能只寫「買進／今日餘額」，把「融資」「融券」放在表頭的群組列，
+ * 所以認不出欄名時改用資料本身判斷：個股表的第一欄是 4 位代號，且欄數放得下資券兩組欄位。
+ */
 export function pickMarginTable(
   payload: { fields?: string[]; data?: string[][]; tables?: { fields?: string[]; data?: string[][] }[] },
 ): { fields: string[]; data: string[][] } | null {
-  const candidates = [...(payload.tables ?? []), { fields: payload.fields, data: payload.data }];
-  const matched = candidates.find((table) => table.data?.length && table.fields?.some((field) => field.includes('融資')));
+  const isMarginTable = (table: { fields?: string[]; data?: string[][] }) => {
+    const rows = table.data ?? [];
+    if (!rows.length) return false;
+    if (table.fields?.some((field) => field.includes('融資'))) return true;
+    return rows.some((row) => /^\d{4}$/.test((row[0] ?? '').trim()) && row.length >= 14);
+  };
+  const matched = [...(payload.tables ?? []), { fields: payload.fields, data: payload.data }].find(isMarginTable);
   return matched?.data ? { fields: matched.fields ?? [], data: matched.data } : null;
 }
 
