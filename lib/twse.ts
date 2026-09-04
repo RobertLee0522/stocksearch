@@ -216,6 +216,28 @@ export function parseFlowRow(row: string[]): InstitutionalFlow | null {
   return { code, name: row[1].trim(), foreign, trust, dealer, total };
 }
 
+/**
+ * 依序取多個交易日的三大法人日報，每取到一天就回報一次，讓畫面可以邊載入邊顯示。
+ * 日報一份約 300KB，所以限制同時進行的請求數，避免一次對證交所送出幾十個請求。
+ */
+export async function eachInstitutionalFlow(
+  dates: string[],
+  onDay: (date: string, flows: InstitutionalFlow[] | null) => void,
+  concurrency = 3,
+) {
+  const queue = [...dates];
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    for (let date = queue.shift(); date; date = queue.shift()) {
+      try {
+        onDay(date, await fetchInstitutionalFlows(date));
+      } catch {
+        onDay(date, null);
+      }
+    }
+  });
+  await Promise.all(workers);
+}
+
 /** 指定交易日的三大法人買賣超（單位：張），只保留 4 位數代號的上市個股。 */
 export async function fetchInstitutionalFlows(date: string): Promise<InstitutionalFlow[]> {
   const response = await fetch(`${T86}?response=json&date=${date}&selectType=ALL`);

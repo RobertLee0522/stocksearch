@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Bell, Building2, ChevronDown, ExternalLink, Landmark,
   Menu, Search, ShieldAlert, Star, TrendingDown, TrendingUp, Users,
@@ -11,13 +11,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { FlowRanking, formatDate, lots, MarketOverview } from '@/app/market-panels';
 import {
-  fetchInstitutionalFlows, fetchMarketSnapshot, fetchOfficialStock,
+  eachInstitutionalFlow, fetchMarketSnapshot, fetchOfficialStock,
   type Candle, type DailyQuote, type InstitutionalFlow, type MarketSnapshot, type OfficialStock,
 } from '@/lib/twse';
 import { readWatchlist, searchStocks, type StockOption, writeWatchlist } from '@/lib/watchlist';
 
 /** 每次要部署時手動遞增，方便從畫面確認線上版本是否已更新。 */
-const APP_VERSION = 'v2026.09.04-2';
+const APP_VERSION = 'v2026.09.04-3';
 
 type Seed = {
   code: string;
@@ -30,6 +30,23 @@ type Stock = Seed & { price: number; change: number; volume: string; candles: Ca
 const views = ['市場總覽', '個股研究', '籌碼排行'] as const;
 
 type View = typeof views[number];
+
+const ranges = ['5日', '20日', '60日'] as const;
+
+type Range = typeof ranges[number];
+
+const parties = ['外資', '投信', '自營商', '三大法人'] as const;
+
+type Party = typeof parties[number];
+
+/** 日 K 與買賣超長條共用同一組座標，兩張圖的同一天才會對齊在同一個 x。 */
+const chart = { width: 760, left: 48, right: 12 };
+
+/** 一個交易日的收盤價與當日買賣超；日報還沒到齊時 flow 為 null。 */
+type FlowRow = { ymd: string; date: string; close: number; flow: InstitutionalFlow | null; loaded: boolean };
+
+const partyValue = (flow: InstitutionalFlow, party: Party) =>
+  party === '外資' ? flow.foreign : party === '投信' ? flow.trust : party === '自營商' ? flow.dealer : flow.total;
 
 /** 內建名單提供產業標籤與自選清單的預設值；價格與籌碼一律取自證交所公開資料。 */
 const seeds: Seed[] = [
@@ -73,6 +90,10 @@ export default function Home() {
   const [flowErrors, setFlowErrors] = useState<Record<string, string>>({});
   const [dataError, setDataError] = useState('');
   const [flowDate, setFlowDate] = useState('');
+  const [range, setRange] = useState<Range>('20日');
+  const [party, setParty] = useState<Party>('外資');
+  // 已經送出過請求的日期，避免快取更新後又重複抓同一天。
+  const requested = useRef<Set<string>>(new Set());
   const [view, setView] = useState<View>('個股研究');
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
@@ -87,6 +108,19 @@ export default function Home() {
   const activeFlowDate = flowDate || quoteDate;
   const flows = flowsByDate[activeFlowDate] ?? null;
   const flowError = flowErrors[activeFlowDate] ?? '';
+  const shown = range === '5日' ? 5 : range === '20日' ? 20 : 60;
+
+  const shownCandles = useMemo(() => (stock?.candles ?? []).slice(-shown), [stock, shown]);
+
+  /** 圖表與表格共用的資料：取最近 N 個交易日，把當日收盤價與該股的買賣超併在一起。 */
+  const history = useMemo<FlowRow[]>(() => shownCandles.map((candle) => {
+    const day = flowsByDate[candle.ymd];
+    return {
+      ymd: candle.ymd, date: candle.date, close: candle.close,
+      flow: day?.find((item) => item.code === stock?.code) ?? null,
+      loaded: day !== undefined || flowErrors[candle.ymd] !== undefined,
+    };
+  }), [shownCandles, stock, flowsByDate, flowErrors]);
   const latestFlows = flowsByDate[quoteDate] ?? null;
   const isUp = (stock?.change ?? 0) >= 0;
   const watched = !!stock && watchlist.includes(stock.code);
@@ -134,20 +168,22 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 三大法人日報約 300KB，等知道要看哪一天之後才載入，並且一天只抓一次。
+  // 需要哪些交易日：目前看的那一天，加上圖表與表格要用的近 N 日，新的排前面先載。
+  const wanted = useMemo(
+    () => [...new Set([activeFlowDate, ...shownCandles.map((candle) => candle.ymd).reverse()])].filter(Boolean),
+    [activeFlowDate, shownCandles],
+  );
+
+  // 三大法人日報一份約 300KB，因此限制併發、逐日回填，並且同一天只抓一次。
   useEffect(() => {
-    if (!activeFlowDate || flowsByDate[activeFlowDate] || flowErrors[activeFlowDate]) return;
-    let cancelled = false;
-    fetchInstitutionalFlows(activeFlowDate)
-      .then((list) => {
-        if (!cancelled) setFlowsByDate((cache) => ({ ...cache, [activeFlowDate]: list }));
-      })
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : '三大法人資料暫時無法讀取';
-        if (!cancelled) setFlowErrors((cache) => ({ ...cache, [activeFlowDate]: message }));
-      });
-    return () => { cancelled = true; };
-  }, [activeFlowDate, flowsByDate, flowErrors]);
+    const missing = wanted.filter((date) => !requested.current.has(date));
+    if (!missing.length) return;
+    for (const date of missing) requested.current.add(date);
+    void eachInstitutionalFlow(missing, (date, list) => {
+      if (list) setFlowsByDate((cache) => ({ ...cache, [date]: list }));
+      else setFlowErrors((cache) => ({ ...cache, [date]: '當日沒有三大法人買賣超資料' }));
+    });
+  }, [wanted]);
 
   // 靜態網站會先產出預設清單的 HTML，所以掛載後才讀本機資料，避免 hydration 不一致。
   useEffect(() => {
@@ -211,9 +247,10 @@ export default function Home() {
                 {stock ? <>
                   <StockSummary stock={stock} up={isUp} watched={watched} onWatch={() => toggleWatch(stock.code, stock.name)} />
                   <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.55fr)_minmax(370px,1fr)]">
-                    <KlinePanel stock={stock} selectedDate={activeFlowDate} onPickDate={setFlowDate} />
+                    <KlinePanel stock={stock} history={history} party={party} range={range} onRange={setRange} selectedDate={activeFlowDate} onPickDate={setFlowDate} />
                     <InstitutionPanel stock={stock} flow={flows?.find((item) => item.code === stock.code) ?? null} loaded={flows !== null} date={activeFlowDate} latest={activeFlowDate === quoteDate} error={dataError || flowError} onLatest={() => setFlowDate('')} />
                   </section>
+                  <FlowHistoryPanel stock={stock} history={history} party={party} onParty={setParty} selectedDate={activeFlowDate} onPickDate={setFlowDate} />
                 </> : <section className="grid h-64 place-items-center rounded-2xl border border-white/8 bg-[#0b1d2c] text-sm text-[#8197a5]">正在載入證交所公開日成交資料…</section>}
                 <OwnershipPanel />
               </>}
@@ -235,24 +272,179 @@ function StockSummary({ stock, up, watched, onWatch }: { stock: Stock; up: boole
   return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label={watched ? '移出自選清單' : '加入自選清單'} aria-pressed={watched} title={watched ? '移出自選清單' : '加入自選清單'} onClick={onWatch} className={`mt-1 rounded-lg p-1.5 hover:bg-[#d7a738]/10 ${watched ? 'text-[#d7a738]' : 'text-[#6f8593]'}`}><Star className={`size-5 ${watched ? 'fill-current' : ''}`} /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">證交所公開日成交資料 · 非盤中即時報價{latest ? ` · ${latest.date}` : ''}</p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={latest?.open.toFixed(1) ?? '—'} /><Quote label="最高" value={latest?.high.toFixed(1) ?? '—'} /><Quote label="最低" value={latest?.low.toFixed(1) ?? '—'} /><Quote label="總量" value={stock.volume} /></div></section>;
 }
 
-function KlinePanel({ stock, selectedDate, onPickDate }: { stock: Stock; selectedDate: string; onPickDate: (ymd: string) => void }) {
-  const [range, setRange] = useState('20日');
-  const fullData = stock.candles;
-  const count = range === '5日' ? 5 : range === '20日' ? 20 : 60;
-  const data = fullData.slice(-count);
-  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">日 K 線</h2><p className="mt-1 text-xs text-[#8197a5]">開、高、低、收 · {stock.code} {stock.name} · 顯示 {data.length} 根 · 點 K 棒可看該日法人買賣超</p></div><div className="flex rounded-lg bg-white/6 p-1 text-xs">{['5日', '20日', '60日'].map((item) => <button type="button" key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}</div></div><CandlestickChart data={data} selectedDate={selectedDate} onPick={onPickDate} /><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K</span><span className="ml-auto">證交所公開日成交資料</span></div></section>;
+function KlinePanel({ stock, history, party, range, onRange, selectedDate, onPickDate }: {
+  stock: Stock;
+  history: FlowRow[];
+  party: Party;
+  range: Range;
+  onRange: (range: Range) => void;
+  selectedDate: string;
+  onPickDate: (ymd: string) => void;
+}) {
+  // 兩張圖共用同一個游標位置，滑到哪一天，K 線與買賣超就一起標出同一天。
+  const [hovered, setHovered] = useState(history.length - 1);
+  useEffect(() => setHovered(history.length - 1), [history.length]);
+  const data = (stock.candles ?? []).slice(-history.length);
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5">
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 className="font-semibold">日 K 線 · {party}買賣超</h2>
+        <p className="mt-1 text-xs text-[#8197a5]">{stock.code} {stock.name} · 顯示 {data.length} 根 · 點 K 棒或長條可看該日法人買賣超</p>
+      </div>
+      <div className="flex rounded-lg bg-white/6 p-1 text-xs">
+        {ranges.map((item) => <button type="button" key={item} onClick={() => onRange(item)} className={`rounded-md px-2.5 py-1.5 ${range === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}
+      </div>
+    </div>
+    <CandlestickChart data={data} hovered={hovered} onHover={setHovered} selectedDate={selectedDate} onPick={onPickDate} />
+    <FlowBars rows={history} party={party} hovered={hovered} onHover={setHovered} selectedDate={selectedDate} onPick={onPickDate} />
+    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#8197a5]">
+      <span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#ff6d72]" />收漲 K／買超（零軸上）</span>
+      <span className="flex items-center gap-1.5"><i className="h-2 w-2 bg-[#24d6a5]" />收跌 K／賣超（零軸下）</span>
+      <span className="ml-auto">證交所公開日成交資料與三大法人日報</span>
+    </div>
+  </section>;
 }
 
-function CandlestickChart({ data, selectedDate, onPick }: { data: Candle[]; selectedDate: string; onPick: (ymd: string) => void }) {
-  const [hovered, setHovered] = useState(data.length - 1);
-  useEffect(() => setHovered(data.length - 1), [data]);
-  const width = 760; const height = 310; const pad = { left: 48, right: 12, top: 16, bottom: 38 };
+function CandlestickChart({ data, hovered, onHover, selectedDate, onPick }: {
+  data: Candle[];
+  hovered: number;
+  onHover: (index: number) => void;
+  selectedDate: string;
+  onPick: (ymd: string) => void;
+}) {
+  const height = 290; const pad = { left: chart.left, right: chart.right, top: 16, bottom: 10 };
   const max = Math.max(...data.map((item) => item.high)); const min = Math.min(...data.map((item) => item.low)); const buffer = (max - min) * 0.14 || 1;
-  const ceiling = max + buffer; const floor = min - buffer; const plotHeight = height - pad.top - pad.bottom; const plotWidth = width - pad.left - pad.right;
+  const ceiling = max + buffer; const floor = min - buffer; const plotHeight = height - pad.top - pad.bottom; const plotWidth = chart.width - pad.left - pad.right;
   const y = (value: number) => pad.top + (ceiling - value) / (ceiling - floor) * plotHeight;
   const step = plotWidth / data.length; const candleWidth = Math.min(28, Math.max(3, step * 0.58)); const selected = data[hovered] ?? data[data.length - 1];
   const ticks = [ceiling, (ceiling * 2 + floor) / 3, (ceiling + floor * 2) / 3, floor];
-  return <div className="relative h-[310px] w-full overflow-hidden"><svg role="img" aria-label="日 K 線圖" viewBox={`0 0 ${width} ${height}`} className="h-full w-full"><rect width={width} height={height} fill="transparent" />{ticks.map((tick) => <g key={tick}><line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" /><text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text></g>)}{data.map((item, index) => { const x = pad.left + step * index + step / 2; const rise = item.close >= item.open; const color = rise ? '#ff6d72' : '#24d6a5'; const bodyTop = y(Math.max(item.open, item.close)); const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close))); const picked = item.ymd !== '' && item.ymd === selectedDate; return <g key={item.ymd || item.date} onMouseEnter={() => setHovered(index)} onClick={() => { setHovered(index); onPick(item.ymd); }} onTouchStart={() => { setHovered(index); onPick(item.ymd); }} className="cursor-pointer"><rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={picked ? '#24d6a51e' : hovered === index ? '#ffffff08' : 'transparent'} />{picked && <rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill="none" stroke="#24d6a5" strokeWidth="1" />}<line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" /><rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" /><text x={x} y={height - 16} fill="#718897" fontSize="10" textAnchor="middle">{index % Math.ceil(data.length / 6) === 0 || index === data.length - 1 ? item.date : ''}</text></g>; })}</svg><div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg"><span className="mr-3 text-[#879ca9]">{selected.date}</span>開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong></div></div>;
+  return <div className="relative h-[290px] w-full overflow-hidden">
+    <svg aria-label="日 K 線圖" viewBox={`0 0 ${chart.width} ${height}`} className="h-full w-full"><title>日 K 線圖</title>
+      {ticks.map((tick) => <g key={tick}>
+        <line x1={pad.left} x2={chart.width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" />
+        <text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text>
+      </g>)}
+      {data.map((item, index) => {
+        const x = pad.left + step * index + step / 2;
+        const rise = item.close >= item.open;
+        const color = rise ? '#ff6d72' : '#24d6a5';
+        const bodyTop = y(Math.max(item.open, item.close));
+        const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close)));
+        const picked = item.ymd !== '' && item.ymd === selectedDate;
+        return <g key={item.ymd || item.date} onMouseEnter={() => onHover(index)} onClick={() => onPick(item.ymd)} onTouchStart={() => { onHover(index); onPick(item.ymd); }} className="cursor-pointer">
+          <rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={picked ? '#24d6a51e' : hovered === index ? '#ffffff08' : 'transparent'} />
+          {picked && <rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill="none" stroke="#24d6a5" strokeWidth="1" />}
+          <line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" />
+          <rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" />
+        </g>;
+      })}
+    </svg>
+    <div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg">
+      <span className="mr-3 text-[#879ca9]">{selected.date}</span>
+      開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong>
+    </div>
+  </div>;
+}
+
+/**
+ * 買賣超長條，x 座標與上方日 K 完全相同，同一天在兩張圖會對齊。
+ * 買超在零軸上、賣超在零軸下，方向本身就是第二種編碼，紅綠在色覺缺陷下不易分辨時仍可判讀。
+ */
+function FlowBars({ rows, party, hovered, onHover, selectedDate, onPick }: {
+  rows: FlowRow[];
+  party: Party;
+  hovered: number;
+  onHover: (index: number) => void;
+  selectedDate: string;
+  onPick: (ymd: string) => void;
+}) {
+  const height = 130; const pad = { left: chart.left, right: chart.right, top: 12, bottom: 22 };
+  const plotHeight = height - pad.top - pad.bottom; const plotWidth = chart.width - pad.left - pad.right;
+  const values = rows.map((row) => (row.flow ? partyValue(row.flow, party) : 0));
+  const scale = Math.max(...values.map(Math.abs), 1);
+  const zero = pad.top + plotHeight / 2;
+  const y = (value: number) => zero - value / scale * (plotHeight / 2);
+  const step = plotWidth / Math.max(rows.length, 1);
+  const barWidth = Math.max(2, Math.min(22, step - 2));
+  const day = rows[hovered];
+  const hoveredValue = day?.flow ? partyValue(day.flow, party) : null;
+  const labelEvery = Math.ceil(rows.length / 6);
+  return <div className="relative mt-1 h-[130px] w-full overflow-hidden">
+    <svg aria-label={`${party}買賣超長條圖`} viewBox={`0 0 ${chart.width} ${height}`} className="h-full w-full"><title>{party}買賣超長條圖</title>
+      <line x1={pad.left} x2={chart.width - pad.right} y1={zero} y2={zero} stroke="#ffffff22" />
+      <text x={pad.left - 8} y={pad.top + 10} fill="#718897" fontSize="10" textAnchor="end">{lots(Math.round(scale))}</text>
+      <text x={pad.left - 8} y={zero + 4} fill="#718897" fontSize="10" textAnchor="end">0</text>
+      <text x={pad.left - 8} y={pad.top + plotHeight} fill="#718897" fontSize="10" textAnchor="end">{lots(-Math.round(scale))}</text>
+      {rows.map((row, index) => {
+        const x = pad.left + step * index + step / 2;
+        const value = row.flow ? partyValue(row.flow, party) : 0;
+        const buying = value >= 0;
+        const top = Math.min(y(value), zero);
+        const barHeight = Math.max(row.flow && value !== 0 ? 2 : 0, Math.abs(y(value) - zero));
+        const picked = row.ymd === selectedDate;
+        return <g key={row.ymd} onMouseEnter={() => onHover(index)} onClick={() => onPick(row.ymd)} onTouchStart={() => { onHover(index); onPick(row.ymd); }} className="cursor-pointer">
+          <rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={picked ? '#24d6a51e' : hovered === index ? '#ffffff08' : 'transparent'} />
+          <rect x={x - barWidth / 2} y={top} width={barWidth} height={barHeight} rx="2" fill={buying ? '#ff6d72' : '#24d6a5'} />
+          {!row.loaded && <circle cx={x} cy={zero} r="1.6" fill="#5b7183" />}
+          <text x={x} y={height - 6} fill="#718897" fontSize="10" textAnchor="middle">{index % labelEvery === 0 || index === rows.length - 1 ? row.date : ''}</text>
+        </g>;
+      })}
+    </svg>
+    <div className="pointer-events-none absolute right-2 top-1 rounded-md border border-white/10 bg-[#102638]/95 px-2 py-1 font-mono text-[11px] text-[#bfd0d9]">
+      <span className="mr-2 text-[#879ca9]">{day?.date ?? '—'}</span>
+      {party} <strong className={hoveredValue === null ? 'text-[#8197a5]' : hoveredValue >= 0 ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{hoveredValue === null ? (day?.loaded ? '無資料' : '載入中') : `${lots(hoveredValue)} 張`}</strong>
+    </div>
+  </div>;
+}
+
+/** 逐日的四種法人買賣超，對應參考中的日期表；點任一列等同點該日 K 棒。 */
+function FlowHistoryPanel({ stock, history, party, onParty, selectedDate, onPickDate }: {
+  stock: Stock;
+  history: FlowRow[];
+  party: Party;
+  onParty: (party: Party) => void;
+  selectedDate: string;
+  onPickDate: (ymd: string) => void;
+}) {
+  const loaded = history.filter((row) => row.loaded).length;
+  const rows = [...history].reverse();
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 className="font-semibold">法人買賣超日表</h2>
+        <p className="mt-1 text-xs text-[#8197a5]">單位：張 · {stock.code} {stock.name} · 每日收盤後公布 · 點任一列可切換日期</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-mono text-[11px] text-[#8197a5]">已載入 {loaded}/{history.length} 日</span>
+        <div className="flex rounded-lg bg-white/6 p-1 text-xs">
+          {parties.map((item) => <button type="button" key={item} onClick={() => onParty(item)} className={`rounded-md px-2.5 py-1.5 ${party === item ? 'bg-[#1f3848] text-white' : 'text-[#8ba0ad]'}`}>{item}</button>)}
+        </div>
+      </div>
+    </div>
+    <div className="mt-4 max-h-[420px] overflow-auto">
+      <table className="w-full min-w-[560px] text-left text-sm">
+        <thead className="sticky top-0 bg-[#0b1d2c] text-[11px] text-[#728998]">
+          <tr className="border-b border-white/8">
+            <th className="pb-3 font-medium">日期</th>
+            <th className="pb-3 text-right font-medium">收盤</th>
+            {parties.map((item) => <th key={item} className={`pb-3 text-right font-medium ${item === party ? 'text-[#cfdde4]' : ''}`}>{item}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => <tr key={row.ymd} onClick={() => onPickDate(row.ymd)} className={`cursor-pointer border-b border-white/5 last:border-0 hover:bg-white/[.03] ${row.ymd === selectedDate ? 'bg-white/[.05]' : ''}`}>
+            <td className="py-2.5 font-mono text-[13px]">{row.date}</td>
+            <td className="py-2.5 text-right font-mono text-[#afc0c9]">{row.close.toLocaleString('zh-TW')}</td>
+            {parties.map((item) => {
+              const value = row.flow ? partyValue(row.flow, item) : null;
+              return <td key={item} className={`py-2.5 text-right font-mono ${value === null ? 'text-[#5f7484]' : value >= 0 ? 'text-[#ff8588]' : 'text-[#55e6bc]'} ${item === party ? 'font-semibold' : ''}`}>
+                {value === null ? (row.loaded ? '—' : '…') : lots(value)}
+              </td>;
+            })}
+          </tr>)}
+        </tbody>
+      </table>
+    </div>
+  </section>;
 }
 
 function InstitutionPanel({ stock, flow, loaded, date, latest, error, onLatest }: { stock: Stock; flow: InstitutionalFlow | null; loaded: boolean; date: string; latest: boolean; error: string; onLatest: () => void }) {
