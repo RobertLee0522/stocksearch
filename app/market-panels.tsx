@@ -104,10 +104,11 @@ export function MarketOverview({ snapshot, onSelect }: { snapshot: MarketSnapsho
 const sides = ['買超', '賣超'] as const;
 const parties = ['三大法人', '外資', '投信', '自營商'] as const;
 
-export function FlowRanking({ flows, quotes, quoteDate, onSelect }: {
+export function FlowRanking({ flows, quotes, quoteDate, error, onSelect }: {
   flows: InstitutionalFlow[] | null;
   quotes: Record<string, DailyQuote>;
   quoteDate: string;
+  error: string;
   onSelect: (code: string) => void;
 }) {
   const [side, setSide] = useState<typeof sides[number]>('買超');
@@ -122,13 +123,13 @@ export function FlowRanking({ flows, quotes, quoteDate, onSelect }: {
       .slice(0, 20);
   }, [flows, side, party]);
 
-  if (!flows) return <Loading label="正在載入三大法人買賣超日報…" />;
+  if (!flows) return <Loading label={error || '正在載入三大法人買賣超日報…'} />;
 
   return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h2 className="font-semibold">三大法人買賣超排行</h2>
-        <p className="mt-1 text-xs text-[#8197a5]">單位：張 · 僅上市個股 · {formatDate(quoteDate)}</p>
+        <p className="mt-1 text-xs text-[#8197a5]">單位：張 · 僅上市個股 · {formatDate(quoteDate)} 收盤後公布</p>
       </div>
       <div className="flex flex-wrap gap-2">
         <div className="flex rounded-lg bg-white/6 p-1 text-xs">

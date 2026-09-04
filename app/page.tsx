@@ -17,7 +17,7 @@ import {
 import { readWatchlist, searchStocks, type StockOption, writeWatchlist } from '@/lib/watchlist';
 
 /** 每次要部署時手動遞增，方便從畫面確認線上版本是否已更新。 */
-const APP_VERSION = 'v2026.09.03-3';
+const APP_VERSION = 'v2026.09.04-1';
 
 type Seed = {
   code: string;
@@ -68,6 +68,7 @@ export default function Home() {
   const [stock, setStock] = useState<Stock | null>(null);
   const [snapshot, setSnapshot] = useState<MarketSnapshot | null>(null);
   const [flows, setFlows] = useState<InstitutionalFlow[] | null>(null);
+  const [flowError, setFlowError] = useState('');
   const [view, setView] = useState<View>('個股研究');
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
@@ -123,7 +124,7 @@ export default function Home() {
         // 三大法人日報約 300KB，等大盤資料到齊後再背景載入，避免拖慢首次顯示。
         return fetchInstitutionalFlows(market.date).then(setFlows);
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => setFlowError(error instanceof Error ? error.message : '證交所公開資料暫時無法讀取'));
     void lookupOfficialStock(seeds[0].code);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -185,13 +186,13 @@ export default function Home() {
         <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
           <div className="space-y-5">
             {view === '市場總覽' ? <MarketOverview snapshot={snapshot} onSelect={openStock} />
-              : view === '籌碼排行' ? <FlowRanking flows={flows} quotes={quotes} quoteDate={quoteDate} onSelect={openStock} />
+              : view === '籌碼排行' ? <FlowRanking flows={flows} quotes={quotes} quoteDate={quoteDate} error={flowError} onSelect={openStock} />
               : <>
                 {stock ? <>
                   <StockSummary stock={stock} up={isUp} watched={watched} onWatch={() => toggleWatch(stock.code, stock.name)} />
                   <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.55fr)_minmax(370px,1fr)]">
                     <KlinePanel stock={stock} />
-                    <InstitutionPanel stock={stock} flow={flows?.find((item) => item.code === stock.code) ?? null} loaded={flows !== null} />
+                    <InstitutionPanel stock={stock} flow={flows?.find((item) => item.code === stock.code) ?? null} loaded={flows !== null} date={quoteDate} error={flowError} />
                   </section>
                 </> : <section className="grid h-64 place-items-center rounded-2xl border border-white/8 bg-[#0b1d2c] text-sm text-[#8197a5]">正在載入證交所公開日成交資料…</section>}
                 <OwnershipPanel />
@@ -234,11 +235,12 @@ function CandlestickChart({ data }: { data: Candle[] }) {
   return <div className="relative h-[310px] w-full overflow-hidden"><svg role="img" aria-label="日 K 線圖" viewBox={`0 0 ${width} ${height}`} className="h-full w-full"><rect width={width} height={height} fill="transparent" />{ticks.map((tick) => <g key={tick}><line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#ffffff12" /><text x={pad.left - 8} y={y(tick) + 4} fill="#718897" fontSize="11" textAnchor="end">{tick.toFixed(1)}</text></g>)}{data.map((item, index) => { const x = pad.left + step * index + step / 2; const rise = item.close >= item.open; const color = rise ? '#ff6d72' : '#24d6a5'; const bodyTop = y(Math.max(item.open, item.close)); const bodyHeight = Math.max(2, Math.abs(y(item.open) - y(item.close))); return <g key={item.date} onMouseEnter={() => setHovered(index)} onClick={() => setHovered(index)} onTouchStart={() => setHovered(index)} className="cursor-crosshair"><rect x={x - step / 2} y={pad.top} width={step} height={plotHeight} fill={hovered === index ? '#ffffff08' : 'transparent'} /><line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} stroke={color} strokeWidth="1.5" /><rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" /><text x={x} y={height - 16} fill="#718897" fontSize="10" textAnchor="middle">{index % Math.ceil(data.length / 6) === 0 || index === data.length - 1 ? item.date : ''}</text></g>; })}</svg><div className="pointer-events-none absolute right-2 top-2 rounded-lg border border-white/10 bg-[#102638]/95 px-3 py-2 font-mono text-[11px] text-[#bfd0d9] shadow-lg"><span className="mr-3 text-[#879ca9]">{selected.date}</span>開 {selected.open.toFixed(1)}　高 {selected.high.toFixed(1)}　低 {selected.low.toFixed(1)}　收 <strong className={selected.close >= selected.open ? 'text-[#ff8588]' : 'text-[#59e4bd]'}>{selected.close.toFixed(1)}</strong></div></div>;
 }
 
-function InstitutionPanel({ stock, flow, loaded }: { stock: Stock; flow: InstitutionalFlow | null; loaded: boolean }) {
+function InstitutionPanel({ stock, flow, loaded, date, error }: { stock: Stock; flow: InstitutionalFlow | null; loaded: boolean; date: string; error: string }) {
   const rows = [{ title: '外資', value: flow?.foreign, icon: Building2 }, { title: '投信', value: flow?.trust, icon: Landmark }, { title: '自營商', value: flow?.dealer, icon: WalletCards }];
   const scale = Math.max(...rows.map((row) => Math.abs(row.value ?? 0)), 1);
-  const status = loaded ? (flow ? '證交所三大法人日報' : '當日無買賣超資料') : '載入中…';
-  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center justify-between"><div><h2 className="font-semibold">法人買賣超</h2><p className="mt-1 text-xs text-[#8197a5]">單位：張 · {stock.code} {stock.name}</p></div><span className="text-xs text-[#64dfbb]">{status}</span></div><div className="mt-5 space-y-4">{rows.map(({ title, value, icon: Icon }) => { const buying = (value ?? 0) >= 0; return <div key={title} className="flex items-center gap-3"><span className={`grid size-9 place-items-center rounded-lg ${buying ? 'bg-[#ff6d72]/10 text-[#ff8588]' : 'bg-[#24d6a5]/10 text-[#55e6bc]'}`}><Icon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex justify-between text-sm"><span>{title}</span><strong className={`font-mono ${buying ? 'text-[#ff8588]' : 'text-[#55e6bc]'}`}>{value === undefined ? '—' : lots(value)}<small className="ml-1 font-normal text-[#8197a5]">張</small></strong></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/7"><i className={`block h-full rounded-full ${buying ? 'bg-[#ff6d72]' : 'bg-[#24d6a5]'}`} style={{ width: `${Math.min(100, Math.abs(value ?? 0) / scale * 100)}%` }} /></div></div></div>; })}</div><div className="mt-6 rounded-xl border border-[#24d6a5]/14 bg-[#24d6a5]/5 p-3"><p className="text-xs font-medium text-[#75e8c7]">三大法人合計 {flow ? `${lots(flow.total)} 張` : '—'}</p><p className="mt-1.5 text-[11px] text-[#8ca1ad]">僅作為觀察指標，非買賣建議。</p></div></section>;
+  // 三大法人日報是收盤後才公布的日資料，所以一定要標出是哪一個交易日。
+  const status = error ? error : loaded ? (flow ? '證交所三大法人日報' : '當日無買賣超資料') : '載入中…';
+  return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex flex-wrap items-start justify-between gap-2"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">法人買賣超</h2>{date && <span className="rounded-md bg-[#24d6a5]/12 px-2 py-0.5 font-mono text-[11px] text-[#6ee5c1]">{formatDate(date)} 收盤後</span>}</div><p className="mt-1 text-xs text-[#8197a5]">單位：張 · {stock.code} {stock.name}</p></div><span className={`text-xs ${error ? 'text-[#e2b45f]' : 'text-[#64dfbb]'}`}>{status}</span></div><div className="mt-5 space-y-4">{rows.map(({ title, value, icon: Icon }) => { const buying = (value ?? 0) >= 0; return <div key={title} className="flex items-center gap-3"><span className={`grid size-9 place-items-center rounded-lg ${buying ? 'bg-[#ff6d72]/10 text-[#ff8588]' : 'bg-[#24d6a5]/10 text-[#55e6bc]'}`}><Icon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex justify-between text-sm"><span>{title}</span><strong className={`font-mono ${buying ? 'text-[#ff8588]' : 'text-[#55e6bc]'}`}>{value === undefined ? '—' : lots(value)}<small className="ml-1 font-normal text-[#8197a5]">張</small></strong></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/7"><i className={`block h-full rounded-full ${buying ? 'bg-[#ff6d72]' : 'bg-[#24d6a5]'}`} style={{ width: `${Math.min(100, Math.abs(value ?? 0) / scale * 100)}%` }} /></div></div></div>; })}</div><div className="mt-6 rounded-xl border border-[#24d6a5]/14 bg-[#24d6a5]/5 p-3"><p className="text-xs font-medium text-[#75e8c7]">三大法人合計 {flow ? `${lots(flow.total)} 張` : '—'}</p><p className="mt-1.5 text-[11px] text-[#8ca1ad]">{date ? `資料日期 ${formatDate(date)}，為當日收盤後公布的日報，非盤中即時買賣超。` : '資料為收盤後公布的日報，非盤中即時買賣超。'}僅作為觀察指標，非買賣建議。</p></div></section>;
 }
 
 function OwnershipPanel() { const rows = [['大戶 (≥400張)', '7,482', '+1,926', '69%', '偏多累積', true], ['中實戶 (100–399張)', '12,460', '+642', '56%', '偏多累積', true], ['散戶 (<100張)', '38,915', '-2,568', '44%', '偏空調節', false]]; return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><Users className="size-4 text-[#d7a738]" /><h2 className="font-semibold">大戶 / 散戶籌碼</h2></div><p className="mt-1 text-xs text-[#8197a5]">依持股級距觀察集保戶數與持股集中度</p></div><span className="rounded-full border border-[#d7a738]/20 bg-[#d7a738]/10 px-2.5 py-1 text-[10px] text-[#e7d17f]">公開資料為週資料</span></div><div className="mt-5 overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead className="border-b border-white/8 text-[11px] tracking-wide text-[#728998]"><tr><th className="pb-3 font-medium">投資人級距</th><th className="pb-3 text-right font-medium">持股人數</th><th className="pb-3 text-right font-medium">本週增減</th><th className="pb-3 text-right font-medium">持股集中度</th><th className="pb-3 pl-6 font-medium">籌碼傾向</th></tr></thead><tbody>{rows.map(([label, people, change, concentration, signal, up]) => <tr key={String(label)} className="border-b border-white/5 last:border-0"><td className="py-4 font-medium">{label}</td><td className="py-4 text-right font-mono text-[#afc0c9]">{people}</td><td className={`py-4 text-right font-mono ${up ? 'text-[#55e6bc]' : 'text-[#ff8588]'}`}>{change}</td><td className="py-4 text-right"><span className="font-mono">{concentration}</span><span className="ml-2 inline-block h-1.5 w-16 overflow-hidden rounded-full bg-white/7 align-middle"><i className={`block h-full rounded-full ${up ? 'bg-[#24d6a5]' : 'bg-[#ff6d72]'}`} style={{ width: String(concentration) }} /></span></td><td className="py-4 pl-6"><span className={`rounded-md px-2 py-1 text-xs ${up ? 'bg-[#24d6a5]/10 text-[#5ce6bf]' : 'bg-[#ff6d72]/10 text-[#ff989a]'}`}>{signal}</span></td></tr>)}</tbody></table></div></section>; }
