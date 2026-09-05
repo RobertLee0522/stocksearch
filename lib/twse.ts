@@ -216,28 +216,6 @@ export function parseFlowRow(row: string[]): InstitutionalFlow | null {
   return { code, name: row[1].trim(), foreign, trust, dealer, total };
 }
 
-/**
- * 依序取多個交易日的三大法人日報，每取到一天就回報一次，讓畫面可以邊載入邊顯示。
- * 日報一份約 300KB，所以限制同時進行的請求數，避免一次對證交所送出幾十個請求。
- */
-export async function eachInstitutionalFlow(
-  dates: string[],
-  onDay: (date: string, flows: InstitutionalFlow[] | null) => void,
-  concurrency = 3,
-) {
-  const queue = [...dates];
-  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
-    for (let date = queue.shift(); date; date = queue.shift()) {
-      try {
-        onDay(date, await fetchInstitutionalFlows(date));
-      } catch {
-        onDay(date, null);
-      }
-    }
-  });
-  await Promise.all(workers);
-}
-
 /** 指定交易日的三大法人買賣超（單位：張），只保留 4 位數代號的上市個股。 */
 export async function fetchInstitutionalFlows(date: string): Promise<InstitutionalFlow[]> {
   const response = await fetch(`${T86}?response=json&date=${date}&selectType=ALL`);
@@ -247,4 +225,108 @@ export async function fetchInstitutionalFlows(date: string): Promise<Institution
   const flows = (payload.data ?? []).map(parseFlowRow).filter((item): item is InstitutionalFlow => item !== null);
   if (!flows.length) throw new Error('當日沒有三大法人買賣超資料');
   return flows;
+}
+
+export type MarginTrade = {
+  code: string;
+  name: string;
+  /** 融資買進、賣出與餘額，單位為張。 */
+  buy: number;
+  sell: number;
+  balance: number;
+  /** 融資餘額較前一日的增減，正值代表散戶加碼。 */
+  change: number;
+  shortBalance: number;
+  shortChange: number;
+};
+
+const MI_MARGN = 'https://www.twse.com.tw/exchangeReport/MI_MARGN';
+
+/**
+ * 證交所這支報表有時把資料放在 tables，有時直接放在最外層，兩種都要能讀；
+ * 而且欄名可能只寫「買進／今日餘額」，把「融資」「融券」放在表頭的群組列，
+ * 所以認不出欄名時改用資料本身判斷：個股表的第一欄是 4 位代號，且欄數放得下資券兩組欄位。
+ */
+export function pickMarginTable(
+  payload: { fields?: string[]; data?: string[][]; tables?: { fields?: string[]; data?: string[][] }[] },
+): { fields: string[]; data: string[][] } | null {
+  const isMarginTable = (table: { fields?: string[]; data?: string[][] }) => {
+    const rows = table.data ?? [];
+    if (!rows.length) return false;
+    if (table.fields?.some((field) => field.includes('融資'))) return true;
+    return rows.some((row) => /^\d{4}$/.test((row[0] ?? '').trim()) && row.length >= 14);
+  };
+  const matched = [...(payload.tables ?? []), { fields: payload.fields, data: payload.data }].find(isMarginTable);
+  return matched?.data ? { fields: matched.fields ?? [], data: matched.data } : null;
+}
+
+/** 依欄位名稱取值，欄位順序改變時才不會整欄對錯。 */
+const columnOf = (fields: string[], ...names: string[]) =>
+  fields.findIndex((field) => names.some((name) => field.replace(/\s/g, '').includes(name)));
+
+export function parseMarginRow(fields: string[], row: string[]): MarginTrade | null {
+  const at = (fallback: number, ...names: string[]) => {
+    const index = columnOf(fields, ...names);
+    return index >= 0 ? index : fallback;
+  };
+  const code = row[at(0, '股票代號', '證券代號')]?.trim() ?? '';
+  if (!/^\d{4}$/.test(code)) return null;
+  const value = (index: number) => toNumber(row[index] ?? '');
+  const balance = value(at(6, '融資今日餘額'));
+  const previous = value(at(5, '融資前日餘額'));
+  const shortBalance = value(at(12, '融券今日餘額'));
+  const shortPrevious = value(at(11, '融券前日餘額'));
+  if (![balance, previous].every(Number.isFinite)) return null;
+  return {
+    code,
+    name: row[at(1, '股票名稱', '證券名稱')]?.trim() ?? code,
+    buy: value(at(2, '融資買進')),
+    sell: value(at(3, '融資賣出')),
+    balance,
+    change: balance - previous,
+    shortBalance: Number.isFinite(shortBalance) ? shortBalance : 0,
+    shortChange: Number.isFinite(shortBalance) && Number.isFinite(shortPrevious) ? shortBalance - shortPrevious : 0,
+  };
+}
+
+/**
+ * 指定交易日的融資融券餘額（單位：張）。
+ * 證交所沒有公布散戶買賣超，融資餘額的增減是市場慣用的散戶動向代理指標。
+ */
+export async function fetchMarginTrades(date: string): Promise<MarginTrade[]> {
+  const response = await fetch(`${MI_MARGN}?response=json&date=${date}&selectType=ALL`);
+  if (!response.ok) throw new Error('融資融券資料暫時無法讀取');
+  const payload = await response.json() as {
+    stat?: string; fields?: string[]; data?: string[][]; tables?: { fields?: string[]; data?: string[][] }[];
+  };
+  if (payload.stat !== 'OK') throw new Error('當日沒有融資融券資料');
+  const table = pickMarginTable(payload);
+  const margins = (table?.data ?? []).map((row) => parseMarginRow(table?.fields ?? [], row))
+    .filter((item): item is MarginTrade => item !== null);
+  if (!margins.length) throw new Error('當日沒有融資融券資料');
+  return margins;
+}
+
+export type DailyChips = { flows: InstitutionalFlow[] | null; margins: MarginTrade[] | null };
+
+/**
+ * 依序取多個交易日的籌碼資料（三大法人日報與融資融券），每取到一天就回報一次。
+ * 兩份報表都是整個市場的日資料，因此限制同時進行的天數，避免一次送出太多請求。
+ */
+export async function eachDailyChips(
+  dates: string[],
+  onDay: (date: string, chips: DailyChips) => void,
+  concurrency = 3,
+) {
+  const queue = [...dates];
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    for (let date = queue.shift(); date; date = queue.shift()) {
+      const [flows, margins] = await Promise.all([
+        fetchInstitutionalFlows(date).catch(() => null),
+        fetchMarginTrades(date).catch(() => null),
+      ]);
+      onDay(date, { flows, margins });
+    }
+  });
+  await Promise.all(workers);
 }
