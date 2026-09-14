@@ -1,0 +1,8 @@
+name = "stocksearch-quote-proxy"
+main = "quote-proxy.ts"
+# 與專案鎖定的 wrangler 版本相容；設得比執行環境新會讓 wrangler dev 無法啟動。
+compatibility_date = "2026-05-22"
+
+# 只允許自己的站台呼叫；拿掉這段則任何來源都可使用。
+[vars]
+ALLOWED_ORIGINS = "https://robertlee0522.github.io"

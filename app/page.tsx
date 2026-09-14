@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, Bell, Building2, ChevronDown, ExternalLink, Landmark,
+  Activity, Bell, Building2, ExternalLink, Landmark,
   Menu, RotateCw, Search, ShieldAlert, Star, TrendingDown, TrendingUp,
   Users, WalletCards, X,
 } from 'lucide-react';
@@ -15,9 +15,10 @@ import {
   type Candle, type DailyQuote, type InstitutionalFlow, type MarginTrade, type MarketSnapshot, type OfficialStock,
 } from '@/lib/twse';
 import { readWatchlist, searchStocks, type StockOption, writeWatchlist } from '@/lib/watchlist';
+import { fetchLiveQuotes, isMarketOpen, type LiveQuote, readProxyBase, writeProxyBase } from '@/lib/live';
 
 /** 每次要部署時手動遞增，方便從畫面確認線上版本是否已更新。 */
-const APP_VERSION = 'v2026.09.14-1';
+const APP_VERSION = 'v2026.09.14-2';
 
 type Seed = {
   code: string;
@@ -112,6 +113,12 @@ export default function Home() {
   /** 這份報價是什麼時候抓回來的，讓使用者知道畫面上的數字有多新。 */
   const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  /** 即時報價需要自行部署的代理（worker/quote-proxy.ts）；沒有設定時整段功能就不啟用。 */
+  const [proxyBase, setProxyBase] = useState('');
+  const [live, setLive] = useState<Record<string, LiveQuote>>({});
+  const [liveAt, setLiveAt] = useState<Date | null>(null);
+  const [liveError, setLiveError] = useState('');
+  const [liveNonce, setLiveNonce] = useState(0);
   const [party, setParty] = useState<Party>('外資');
   // 已經送出過請求的日期，避免快取更新後又重複抓同一天。
   const requested = useRef<Set<string>>(new Set());
@@ -145,6 +152,7 @@ export default function Home() {
   }), [shownCandles, stock, flowsByDate, marginsByDate, flowErrors]);
   const latestFlows = flowsByDate[quoteDate] ?? null;
   const isUp = (stock?.change ?? 0) >= 0;
+  const liveUp = stock ? (live[stock.code]?.change ?? stock.change) >= 0 : isUp;
   const watched = !!stock && watchlist.includes(stock.code);
 
   /** 全市場清單以當日收盤行情為主，尚未載入時先用內建名單。 */
@@ -212,6 +220,7 @@ export default function Home() {
   // 靜態網站會先產出預設清單的 HTML，所以掛載後才讀本機資料，避免 hydration 不一致。
   useEffect(() => {
     setWatchlist(readWatchlist(defaultWatchlist));
+    setProxyBase(readProxyBase());
     setRestored(true);
   }, []);
 
@@ -223,6 +232,51 @@ export default function Home() {
     const remove = watchlist.includes(code);
     setWatchlist(remove ? watchlist.filter((item) => item !== code) : [code, ...watchlist]);
     setNotice(`${name} 已${remove ? '移出' : '加入'}自選清單，清單保存在這台裝置的瀏覽器。`);
+  }
+
+  /** 畫面上會用到即時報價的代號：目前個股加上自選清單，一次請求就拿得完。 */
+  const liveCodes = useMemo(
+    () => [...new Set([stock?.code ?? '', ...watchlist])].filter(Boolean),
+    [stock, watchlist],
+  );
+
+  useEffect(() => {
+    if (!proxyBase || !liveCodes.length) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const quotes = await fetchLiveQuotes(proxyBase, liveCodes);
+        if (cancelled) return;
+        setLive((current) => ({ ...current, ...Object.fromEntries(quotes.map((quote) => [quote.code, quote])) }));
+        setLiveAt(new Date());
+        setLiveError('');
+      } catch (error) {
+        if (!cancelled) setLiveError(error instanceof Error ? error.message : '即時報價暫時無法取得');
+      }
+    };
+    void tick();
+    // 收盤後報價不會再變，只有盤中才需要重複輪詢，分頁切到背景時也先停下來。
+    const timer = isMarketOpen()
+      ? setInterval(() => { if (document.visibilityState === 'visible') void tick(); }, 10_000)
+      : undefined;
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearInterval(timer);
+    };
+  }, [proxyBase, liveCodes, liveNonce]);
+
+  function useLiveProxy(base: string) {
+    const trimmed = base.trim().replace(/\/+$/, '');
+    writeProxyBase(trimmed);
+    setProxyBase(trimmed);
+    setLiveError('');
+    if (!trimmed) {
+      setLive({});
+      setLiveAt(null);
+      setNotice('已停用即時報價，畫面回到證交所收盤資料。');
+    } else {
+      setNotice('已設定即時報價來源，將開始取得盤中報價。');
+    }
   }
 
   /** 重新向證交所拿一次目前個股與當日行情；證交所公開資料是收盤後才更新，盤中重抓不會變。 */
@@ -237,7 +291,10 @@ export default function Home() {
       ]);
       setStock(toStock(official));
       setFetchedAt(new Date());
-      setNotice(`已更新 ${official.code} ${official.name}。證交所公開資料為收盤後更新，盤中重新整理不會有新價格。`);
+      setLiveNonce((value) => value + 1);
+      setNotice(proxyBase
+        ? `已更新 ${official.code} ${official.name}，並重新取得即時報價。`
+        : `已更新 ${official.code} ${official.name}。證交所公開資料為收盤後更新，盤中重新整理不會有新價格。`);
     } catch (error) {
       setNotice(`${error instanceof Error ? error.message : '重新取得失敗'}，畫面仍顯示上一次取得的資料。`);
     } finally {
@@ -289,7 +346,7 @@ export default function Home() {
               : view === '籌碼排行' ? <FlowRanking flows={latestFlows} quotes={quotes} quoteDate={quoteDate} error={dataError || (flowErrors[quoteDate] ?? '')} onSelect={openStock} />
               : <>
                 {stock ? <>
-                  <StockSummary stock={stock} up={isUp} watched={watched} onWatch={() => toggleWatch(stock.code, stock.name)} fetchedAt={fetchedAt} refreshing={refreshing} onRefresh={() => void refreshQuote()} />
+                  <StockSummary stock={stock} up={liveUp} watched={watched} onWatch={() => toggleWatch(stock.code, stock.name)} fetchedAt={fetchedAt} refreshing={refreshing} onRefresh={() => void refreshQuote()} live={live[stock.code] ?? null} liveStale={!!liveError} />
                   <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.55fr)_minmax(370px,1fr)]">
                     <KlinePanel stock={stock} history={history} party={party} range={range} onRange={setRange} selectedDate={activeFlowDate} onPickDate={setFlowDate} />
                     <InstitutionPanel stock={stock} flow={flows?.find((item) => item.code === stock.code) ?? null} margin={marginsByDate[activeFlowDate]?.find((item) => item.code === stock.code) ?? null} loaded={flows !== null} date={activeFlowDate} latest={activeFlowDate === quoteDate} error={dataError || flowError} onLatest={() => setFlowDate('')} />
@@ -300,9 +357,9 @@ export default function Home() {
               </>}
           </div>
           <aside className="space-y-5">
-            <Watchlist codes={watchlist} activeCode={stock?.code ?? ''} quotes={quotes} quoteDate={quoteDate} onSelect={openStock} onRemove={(code, name) => toggleWatch(code, name)} />
+            <Watchlist codes={watchlist} activeCode={stock?.code ?? ''} quotes={quotes} quoteDate={quoteDate} live={live} onSelect={openStock} onRemove={(code, name) => toggleWatch(code, name)} />
             <SignalPanel />
-            <section className="rounded-2xl border border-[#d7a738]/20 bg-gradient-to-br from-[#1e2a2b] to-[#0b1d2c] p-5"><p className="text-[10px] font-semibold tracking-[.14em] text-[#d7c479]">資料服務接入</p><h2 className="mt-2 text-base font-semibold">下一步：公開資料查詢</h2><p className="mt-2 text-xs leading-5 text-[#9cafb9]">可先接日收盤、法人買賣超與集保週資料；授權 API 則可再擴充盤中報價。</p><button className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-[#6ee5c1] hover:underline" onClick={() => setNotice('免費公開資料版可提供日資料與週籌碼；盤中逐筆行情需另行授權。')}>查看資料層級 <ChevronDown className="size-3 -rotate-90" /></button></section>
+            <LiveSettings key={proxyBase} base={proxyBase} at={liveAt} error={liveError} onApply={useLiveProxy} />
           </aside>
         </section>
       </div>
@@ -310,7 +367,7 @@ export default function Home() {
   );
 }
 
-function StockSummary({ stock, up, watched, onWatch, fetchedAt, refreshing, onRefresh }: {
+function StockSummary({ stock, up, watched, onWatch, fetchedAt, refreshing, onRefresh, live, liveStale }: {
   stock: Stock;
   up: boolean;
   watched: boolean;
@@ -318,10 +375,24 @@ function StockSummary({ stock, up, watched, onWatch, fetchedAt, refreshing, onRe
   fetchedAt: Date | null;
   refreshing: boolean;
   onRefresh: () => void;
+  live: LiveQuote | null;
+  /** 即時連線中斷時畫面仍留著最後一筆報價，必須講明它已經不是即時的。 */
+  liveStale: boolean;
 }) {
   const latest = stock.candles.at(-1);
-  const percent = stock.change / (stock.price - stock.change) * 100;
-  return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label={watched ? '移出自選清單' : '加入自選清單'} aria-pressed={watched} title={watched ? '移出自選清單' : '加入自選清單'} onClick={onWatch} className={`mt-1 rounded-lg p-1.5 hover:bg-[#d7a738]/10 ${watched ? 'text-[#d7a738]' : 'text-[#6f8593]'}`}><Star className={`size-5 ${watched ? 'fill-current' : ''}`} /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">證交所公開日成交資料 · 非盤中即時報價{latest ? ` · 資料日期 ${latest.date}` : ''}</p><div className="mt-2 flex items-center gap-2"><button type="button" onClick={onRefresh} disabled={refreshing} aria-label="重新取得報價" title="重新向證交所取得報價" className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-[#a9bbc5] hover:bg-white/10 disabled:opacity-60"><RotateCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} />{refreshing ? '更新中' : '重新整理'}</button><span className="font-mono text-[11px] text-[#7d93a1]">{fetchedAt ? `${clockLabel(fetchedAt)} 取得` : '尚未取得'}</span></div></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={latest?.open.toFixed(1) ?? '—'} /><Quote label="最高" value={latest?.high.toFixed(1) ?? '—'} /><Quote label="最低" value={latest?.low.toFixed(1) ?? '—'} /><Quote label="總量" value={stock.volume} /></div></section>;
+  // 有即時報價時整組數字都改用它，沒有就維持證交所收盤資料。
+  const price = live ? live.price : stock.price;
+  const change = live ? live.change : stock.change;
+  const percent = live ? live.percent : stock.change / (stock.price - stock.change) * 100;
+  const open = live && Number.isFinite(live.open) ? live.open : latest?.open;
+  const high = live && Number.isFinite(live.high) ? live.high : latest?.high;
+  const low = live && Number.isFinite(live.low) ? live.low : latest?.low;
+  const volume = live && Number.isFinite(live.volume)
+    ? `${Math.round(live.volume).toLocaleString('zh-TW')} 張`
+    : stock.volume;
+  return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label={watched ? '移出自選清單' : '加入自選清單'} aria-pressed={watched} title={watched ? '移出自選清單' : '加入自選清單'} onClick={onWatch} className={`mt-1 rounded-lg p-1.5 hover:bg-[#d7a738]/10 ${watched ? 'text-[#d7a738]' : 'text-[#6f8593]'}`}><Star className={`size-5 ${watched ? 'fill-current' : ''}`} /></button><div><div className="flex flex-wrap items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1>{live && <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${liveStale ? 'bg-[#d7a738]/12 text-[#e2b45f]' : 'bg-[#ff6d72]/12 text-[#ff8588]'}`}><i className={`size-1.5 rounded-full ${liveStale ? 'bg-[#d7a738]' : 'bg-[#ff6d72]'}`} />{liveStale ? '已中斷' : '即時'}</span>}<span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">{live
+  ? `${liveStale ? '即時連線中斷，顯示最後一筆報價' : '證交所即時報價'} · ${live.time || '盤中'}${live.traded ? '' : '（尚未成交，顯示最佳買賣中價）'}`
+  : '證交所公開日成交資料 · 非盤中即時報價'}{latest ? ` · 日 K 資料日期 ${latest.date}` : ''}</p><div className="mt-2 flex items-center gap-2"><button type="button" onClick={onRefresh} disabled={refreshing} aria-label="重新取得報價" title="重新向證交所取得報價" className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-[#a9bbc5] hover:bg-white/10 disabled:opacity-60"><RotateCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} />{refreshing ? '更新中' : '重新整理'}</button><span className="font-mono text-[11px] text-[#7d93a1]">{fetchedAt ? `${clockLabel(fetchedAt)} 取得` : '尚未取得'}{live?.time ? ` · 報價 ${live.time}` : ''}</span></div></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={open?.toFixed(1) ?? '—'} /><Quote label="最高" value={high?.toFixed(1) ?? '—'} /><Quote label="最低" value={low?.toFixed(1) ?? '—'} /><Quote label="總量" value={volume} /></div></section>;
 }
 
 function KlinePanel({ stock, history, party, range, onRange, selectedDate, onPickDate }: {
@@ -528,15 +599,17 @@ function OwnershipPanel() {
   </section>;
 }
 
-function Watchlist({ codes, activeCode, quotes, quoteDate, onSelect, onRemove }: {
+function Watchlist({ codes, activeCode, quotes, quoteDate, live, onSelect, onRemove }: {
   codes: string[];
   activeCode: string;
   quotes: Record<string, DailyQuote>;
   quoteDate: string;
+  live: Record<string, LiveQuote>;
   onSelect: (code: string) => void;
   onRemove: (code: string, name: string) => void;
 }) {
-  const shown = quoteDate ? `${formatDate(quoteDate)} 收盤` : '載入中…';
+  const anyLive = codes.some((code) => live[code]);
+  const shown = anyLive ? '即時報價' : quoteDate ? `${formatDate(quoteDate)} 收盤` : '載入中…';
   return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5">
     <div className="flex items-center justify-between">
       <div>
@@ -548,19 +621,46 @@ function Watchlist({ codes, activeCode, quotes, quoteDate, onSelect, onRemove }:
     {codes.length
       ? <div className="mt-4 divide-y divide-white/6">{codes.map((code) => {
         const quote = quotes[code];
-        const name = quote?.name || seedName(code) || code;
-        const up = (quote?.change ?? 0) >= 0;
-        const percent = quote && quote.close !== quote.change ? quote.change / (quote.close - quote.change) * 100 : 0;
+        const ticking = live[code];
+        const name = ticking?.name || quote?.name || seedName(code) || code;
+        const up = (ticking?.change ?? quote?.change ?? 0) >= 0;
+        const percent = ticking ? ticking.percent
+          : quote && quote.close !== quote.change ? quote.change / (quote.close - quote.change) * 100 : 0;
+        const shownPrice = ticking ? ticking.price : quote?.close;
         return <div key={code} className={`group flex items-center gap-2 py-3 ${code === activeCode ? '-mx-2 rounded-lg bg-white/[.035] px-2' : ''}`}>
           <button onClick={() => onSelect(code)} className="flex min-w-0 flex-1 items-center gap-2 text-left hover:opacity-80">
             <span className={`size-1.5 shrink-0 rounded-full ${up ? 'bg-[#ff6d72]' : 'bg-[#24d6a5]'}`} />
             <span className="min-w-0 flex-1"><strong className="block truncate text-sm font-medium">{name}</strong><small className="font-mono text-[10px] text-[#718795]">{code}</small></span>
-            <span className="text-right"><strong className="block font-mono text-sm">{quote ? quote.close.toLocaleString('zh-TW') : '—'}</strong><small className={`font-mono text-[11px] ${up ? 'text-[#ff8588]' : 'text-[#55e6bc]'}`}>{quote ? `${up ? '+' : ''}${percent.toFixed(2)}%` : '—'}</small></span>
+            <span className="text-right"><strong className="block font-mono text-sm">{shownPrice === undefined ? '—' : shownPrice.toLocaleString('zh-TW')}</strong><small className={`font-mono text-[11px] ${up ? 'text-[#ff8588]' : 'text-[#55e6bc]'}`}>{shownPrice === undefined ? '—' : `${up ? '+' : ''}${percent.toFixed(2)}%`}</small></span>
           </button>
           <button aria-label={`從自選清單移除 ${name}`} title="移出自選清單" onClick={() => onRemove(code, name)} className="rounded-md p-1 text-[#61798a] opacity-0 transition hover:bg-white/8 hover:text-[#ff8588] focus-visible:opacity-100 group-hover:opacity-100"><X className="size-3.5" /></button>
         </div>;
       })}</div>
       : <p className="mt-4 rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-xs leading-5 text-[#8197a5]">清單目前是空的。<br />查詢個股後，點左上角星號即可加入。</p>}
+  </section>;
+}
+
+/** 即時報價需要自行部署代理，這張卡讓使用者填入自己的 Worker 網址並看到目前狀態。 */
+function LiveSettings({ base, at, error, onApply }: {
+  base: string;
+  at: Date | null;
+  error: string;
+  onApply: (base: string) => void;
+}) {
+  const [draft, setDraft] = useState(base);
+  const status = error ? error : base ? (at ? `已啟用 · ${clockLabel(at)} 更新` : '已啟用 · 等待第一筆報價') : '未啟用，目前只顯示收盤資料';
+  return <section className="rounded-2xl border border-[#d7a738]/20 bg-gradient-to-br from-[#1e2a2b] to-[#0b1d2c] p-5">
+    <p className="text-[10px] font-semibold tracking-[.14em] text-[#d7c479]">盤中即時報價</p>
+    <h2 className="mt-2 text-base font-semibold">即時報價來源</h2>
+    <p className="mt-2 text-xs leading-5 text-[#9cafb9]">
+      證交所即時端點不提供 CORS，瀏覽器無法直接取用。請部署 <code className="rounded bg-white/8 px-1 font-mono text-[11px]">worker/quote-proxy.ts</code>，再把 Worker 網址填在這裡（只存在本機瀏覽器）。
+    </p>
+    <Input aria-label="即時報價代理網址" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="https://your-worker.workers.dev" className="mt-3 h-9 border-white/10 bg-white/6 text-xs text-white placeholder:text-[#78909e]" />
+    <div className="mt-3 flex items-center gap-2">
+      <Button type="button" onClick={() => onApply(draft)} className="h-8 bg-[#24d6a5] px-3 text-xs text-[#06201c] hover:bg-[#5ce6bf]">{draft.trim() ? '啟用' : '停用'}</Button>
+      {base && <button type="button" onClick={() => onApply('')} className="text-xs text-[#9cafb9] hover:underline">停用</button>}
+    </div>
+    <p className={`mt-3 text-[11px] ${error ? 'text-[#e2b45f]' : base ? 'text-[#6ee5c1]' : 'text-[#8ca1ad]'}`}>{status}</p>
   </section>;
 }
 
