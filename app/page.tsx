@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Bell, Building2, ChevronDown, ExternalLink, Landmark,
-  Menu, Search, ShieldAlert, Star, TrendingDown, TrendingUp, Users,
-  WalletCards, X,
+  Menu, RotateCw, Search, ShieldAlert, Star, TrendingDown, TrendingUp,
+  Users, WalletCards, X,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -17,7 +17,7 @@ import {
 import { readWatchlist, searchStocks, type StockOption, writeWatchlist } from '@/lib/watchlist';
 
 /** 每次要部署時手動遞增，方便從畫面確認線上版本是否已更新。 */
-const APP_VERSION = 'v2026.09.04-4';
+const APP_VERSION = 'v2026.09.14-1';
 
 type Seed = {
   code: string;
@@ -109,6 +109,9 @@ export default function Home() {
   const [dataError, setDataError] = useState('');
   const [flowDate, setFlowDate] = useState('');
   const [range, setRange] = useState<Range>('20日');
+  /** 這份報價是什麼時候抓回來的，讓使用者知道畫面上的數字有多新。 */
+  const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [party, setParty] = useState<Party>('外資');
   // 已經送出過請求的日期，避免快取更新後又重複抓同一天。
   const requested = useRef<Set<string>>(new Set());
@@ -171,6 +174,7 @@ export default function Home() {
     try {
       const official = await fetchOfficialStock(code);
       setStock(toStock(official));
+      setFetchedAt(new Date());
       setNotice(`已載入 ${official.code} ${official.name}。價格與日 K 線來自證交所公開日成交資料。`);
     } catch (error) {
       setNotice(`${error instanceof Error ? error.message : '查詢暫時失敗'}。目前僅支援上市股票，請稍後再試。`);
@@ -221,6 +225,26 @@ export default function Home() {
     setNotice(`${name} 已${remove ? '移出' : '加入'}自選清單，清單保存在這台裝置的瀏覽器。`);
   }
 
+  /** 重新向證交所拿一次目前個股與當日行情；證交所公開資料是收盤後才更新，盤中重抓不會變。 */
+  async function refreshQuote() {
+    if (!stock || refreshing) return;
+    setRefreshing(true);
+    setNotice(`正在重新取得 ${stock.code} ${stock.name} 的證交所公開資料…`);
+    try {
+      const [official] = await Promise.all([
+        fetchOfficialStock(stock.code),
+        fetchMarketSnapshot().then(setSnapshot).catch(() => undefined),
+      ]);
+      setStock(toStock(official));
+      setFetchedAt(new Date());
+      setNotice(`已更新 ${official.code} ${official.name}。證交所公開資料為收盤後更新，盤中重新整理不會有新價格。`);
+    } catch (error) {
+      setNotice(`${error instanceof Error ? error.message : '重新取得失敗'}，畫面仍顯示上一次取得的資料。`);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   function openStock(code: string) {
     setView('個股研究');
     void lookupOfficialStock(code);
@@ -265,7 +289,7 @@ export default function Home() {
               : view === '籌碼排行' ? <FlowRanking flows={latestFlows} quotes={quotes} quoteDate={quoteDate} error={dataError || (flowErrors[quoteDate] ?? '')} onSelect={openStock} />
               : <>
                 {stock ? <>
-                  <StockSummary stock={stock} up={isUp} watched={watched} onWatch={() => toggleWatch(stock.code, stock.name)} />
+                  <StockSummary stock={stock} up={isUp} watched={watched} onWatch={() => toggleWatch(stock.code, stock.name)} fetchedAt={fetchedAt} refreshing={refreshing} onRefresh={() => void refreshQuote()} />
                   <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.55fr)_minmax(370px,1fr)]">
                     <KlinePanel stock={stock} history={history} party={party} range={range} onRange={setRange} selectedDate={activeFlowDate} onPickDate={setFlowDate} />
                     <InstitutionPanel stock={stock} flow={flows?.find((item) => item.code === stock.code) ?? null} margin={marginsByDate[activeFlowDate]?.find((item) => item.code === stock.code) ?? null} loaded={flows !== null} date={activeFlowDate} latest={activeFlowDate === quoteDate} error={dataError || flowError} onLatest={() => setFlowDate('')} />
@@ -286,10 +310,18 @@ export default function Home() {
   );
 }
 
-function StockSummary({ stock, up, watched, onWatch }: { stock: Stock; up: boolean; watched: boolean; onWatch: () => void }) {
+function StockSummary({ stock, up, watched, onWatch, fetchedAt, refreshing, onRefresh }: {
+  stock: Stock;
+  up: boolean;
+  watched: boolean;
+  onWatch: () => void;
+  fetchedAt: Date | null;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
   const latest = stock.candles.at(-1);
   const percent = stock.change / (stock.price - stock.change) * 100;
-  return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label={watched ? '移出自選清單' : '加入自選清單'} aria-pressed={watched} title={watched ? '移出自選清單' : '加入自選清單'} onClick={onWatch} className={`mt-1 rounded-lg p-1.5 hover:bg-[#d7a738]/10 ${watched ? 'text-[#d7a738]' : 'text-[#6f8593]'}`}><Star className={`size-5 ${watched ? 'fill-current' : ''}`} /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">證交所公開日成交資料 · 非盤中即時報價{latest ? ` · ${latest.date}` : ''}</p></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={latest?.open.toFixed(1) ?? '—'} /><Quote label="最高" value={latest?.high.toFixed(1) ?? '—'} /><Quote label="最低" value={latest?.low.toFixed(1) ?? '—'} /><Quote label="總量" value={stock.volume} /></div></section>;
+  return <section className="grid gap-4 rounded-2xl border border-white/8 bg-[#0b1d2c] p-5 shadow-2xl shadow-black/10 md:grid-cols-[1.1fr_1fr_auto] md:items-center"><div className="flex items-start gap-3"><button aria-label={watched ? '移出自選清單' : '加入自選清單'} aria-pressed={watched} title={watched ? '移出自選清單' : '加入自選清單'} onClick={onWatch} className={`mt-1 rounded-lg p-1.5 hover:bg-[#d7a738]/10 ${watched ? 'text-[#d7a738]' : 'text-[#6f8593]'}`}><Star className={`size-5 ${watched ? 'fill-current' : ''}`} /></button><div><div className="flex items-center gap-2"><h1 className="text-2xl font-semibold tracking-tight">{stock.name}</h1><span className="rounded bg-white/8 px-1.5 py-0.5 font-mono text-xs text-[#9db0bd]">{stock.code}</span><span className="rounded bg-[#24d6a5]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[#58e5bb]">{stock.industry}</span></div><p className="mt-2 text-xs text-[#8298a7]">證交所公開日成交資料 · 非盤中即時報價{latest ? ` · 資料日期 ${latest.date}` : ''}</p><div className="mt-2 flex items-center gap-2"><button type="button" onClick={onRefresh} disabled={refreshing} aria-label="重新取得報價" title="重新向證交所取得報價" className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-[#a9bbc5] hover:bg-white/10 disabled:opacity-60"><RotateCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} />{refreshing ? '更新中' : '重新整理'}</button><span className="font-mono text-[11px] text-[#7d93a1]">{fetchedAt ? `${clockLabel(fetchedAt)} 取得` : '尚未取得'}</span></div></div></div><div><div className={`font-mono text-4xl font-semibold tracking-tight ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{stock.price.toLocaleString('zh-TW', { minimumFractionDigits: 1 })}</div><div className={`mt-1 flex items-center gap-2 font-mono text-sm font-medium ${up ? 'text-[#ff6d72]' : 'text-[#54d9a7]'}`}>{up ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}{up ? '+' : ''}{stock.change.toFixed(1)} <span>{up ? '+' : ''}{percent.toFixed(2)}%</span></div></div><div className="grid grid-cols-2 gap-x-5 text-right text-xs lg:grid-cols-4"><Quote label="今開" value={latest?.open.toFixed(1) ?? '—'} /><Quote label="最高" value={latest?.high.toFixed(1) ?? '—'} /><Quote label="最低" value={latest?.low.toFixed(1) ?? '—'} /><Quote label="總量" value={stock.volume} /></div></section>;
 }
 
 function KlinePanel({ stock, history, party, range, onRange, selectedDate, onPickDate }: {
@@ -533,6 +565,16 @@ function Watchlist({ codes, activeCode, quotes, quoteDate, onSelect, onRemove }:
 }
 
 function SignalPanel() { return <section className="rounded-2xl border border-white/8 bg-[#0b1d2c] p-5"><div className="flex items-center gap-2"><Activity className="size-4 text-[#7bc0ff]" /><h2 className="font-semibold">籌碼訊號</h2></div><div className="mt-4 space-y-3"><Signal label="法人動能" value="偏多" progress="76%" color="bg-[#24d6a5]" /><Signal label="大戶集中" value="升溫" progress="69%" color="bg-[#d7a738]" /><Signal label="短線乖離" value="中性" progress="48%" color="bg-[#6ea8ff]" /></div><button className="mt-5 flex w-full items-center justify-center gap-1 text-xs text-[#67dfbc] hover:underline">設定訊號警示 <ExternalLink className="size-3" /></button></section>; }
+/**
+ * 取得時間標在重新整理旁邊，用本機時間的 HH:MM:SS；
+ * 分頁開著過夜時只看時分秒會誤以為是剛剛抓的，所以不是今天就補上日期。
+ */
+function clockLabel(date: Date, now = new Date()) {
+  const time = date.toLocaleTimeString('zh-TW', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const sameDay = date.toDateString() === now.toDateString();
+  return sameDay ? time : `${date.toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' })} ${time}`;
+}
+
 function Figure({ label, value, tone }: { label: string; value: string; tone: 'up' | 'down' | 'flat' }) {
   const color = tone === 'up' ? 'text-[#ff8588]' : tone === 'down' ? 'text-[#55e6bc]' : 'text-[#cfdde4]';
   return <div><p className="text-[#78909e]">{label}</p><p className={`mt-0.5 font-mono font-medium ${color}`}>{value}</p></div>;
